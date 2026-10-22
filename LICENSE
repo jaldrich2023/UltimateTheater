@@ -1,0 +1,55 @@
+Ultimate Theater
+Copyright (c) 2026 John Aldrich. All rights reserved.
+
+This software, including its source code, object code, the Ultimate Theater
+playback engine, user interface designs, icons, and documentation (together,
+the "Software"), is the proprietary property of John Aldrich (the "Owner")
+and is protected by copyright law and international treaties.
+
+1. License grant. Subject to these terms, the Owner grants you a personal,
+   non-exclusive, non-transferable, revocable license to install and use one
+   copy of the compiled application on Apple computers that you own or
+   control, for your own personal, non-commercial use.
+
+2. Restrictions. Except as expressly permitted by the Owner in writing, you
+   may not: (a) copy, modify, translate, or create derivative works of the
+   Software; (b) distribute, sell, rent, lease, sublicense, or otherwise
+   transfer the Software; (c) reverse engineer, decompile, or disassemble the
+   Software, except to the extent applicable law expressly permits it
+   notwithstanding this limitation; or (d) remove or alter any proprietary
+   notices.
+
+3. Source code. Access to the source code does not grant any rights to use,
+   copy, modify, or distribute it. No license is granted by implication,
+   estoppel, or otherwise.
+
+4. Your content. The Software plays and organizes media files that you
+   supply. You are solely responsible for having the rights to the media you
+   add. The Owner claims no rights in your media.
+
+5. Third-party services and data. The Software retrieves information from
+   third-party services (including TMDB, OMDb, TVmaze, and Wikipedia) using
+   credentials you provide. That information is subject to those services'
+   own terms, which you agree to follow. See THIRD_PARTY_NOTICES.md.
+
+6. Ownership. The Owner retains all right, title, and interest in and to the
+   Software, including all intellectual property rights.
+
+7. Termination. This license ends automatically if you breach these terms.
+   On termination you must stop using and delete all copies of the Software.
+
+8. Disclaimer of warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+   WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+   NONINFRINGEMENT.
+
+9. Limitation of liability. TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO
+   EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+   FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+10. Governing terms. If the Software is obtained through the Mac App Store,
+    Apple's Licensed Application End User License Agreement also applies,
+    and these terms supplement it to the extent they do not conflict.
+
+For licensing inquiries, contact the Owner.
