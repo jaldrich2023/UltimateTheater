@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ultimate Theater — Your movies. Your theater.</title>
+<link rel="stylesheet" href="theater.css">
+<style>
+  /* Page-specific layout. Sizes are in inches so every page fits Letter exactly. */
+  .cover h1 { font-size: 76px; line-height: 0.92; font-weight: 900; font-stretch: condensed; letter-spacing: -0.015em; margin-top: 0.12in; }
+  .cover .lede { font-size: 14px; max-width: 6.2in; margin-top: 0.2in; }
+  .cover .hero { margin: 0.3in auto 0; width: 6.55in; }
+  .cover .chips { margin-top: 0.24in; gap: 7px; justify-content: center; }
+  .cover .chips .chip { font-size: 11px; padding: 6px 13px; }
+
+  .crop { width: 100%; object-fit: cover; display: block; }
+  .row { display: grid; gap: 0.16in; }
+  .brochure .mt-s { margin-top: 0.14in; }
+  .brochure .mt-m { margin-top: 0.19in; }
+  .brochure .mt-l { margin-top: 0.3in; }
+  .brochure h2.mt-s { margin-top: 0.05in; }
+  .brochure .tight { gap: 10px; }
+
+  .format-panel { padding: 12px 14px 13px; border-radius: 18px; }
+  .format-panel h3 { font-size: 12.5px; margin-bottom: 2px; }
+  .format-panel .chips { gap: 4px; margin-top: 6px; }
+  .format-panel .chip { font-size: 9.5px; padding: 3px 9px; }
+
+  .family { padding: 12px 14px; border-radius: 18px; }
+  .family h3 { font-size: 13px; }
+  .family p { font-size: 9.6px; }
+
+  .req { padding: 13px 18px; border-radius: 18px; display: grid; grid-template-columns: 1.25fr 1fr 1fr 1fr; gap: 14px; align-items: start; }
+  .req .k { font-size: 8.5px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: var(--gold); margin-bottom: 3px; }
+  .req .v { font-size: 10.5px; color: #fff; font-weight: 600; line-height: 1.4; }
+  .req .v span { display: block; font-weight: 400; color: var(--muted); font-size: 9.5px; }
+
+  .fine { padding: 12px 16px; border-radius: 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+  .fine .tmdb { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+  .fine .tmdb img { height: 9px; }
+  .fine .cols { columns: 2; column-gap: 0.25in; }
+
+  .quote {
+    font-size: 21px; line-height: 1.25; font-weight: 800; font-stretch: condensed; color: #fff;
+  }
+  .statline { display: grid; grid-template-columns: 0.55in 1fr; align-items: center; padding: 9px 13px; }
+  .statline .n { font-size: 30px; }
+  .statline .l { margin-top: 0; }
+  .label-under { font-size: 9px; color: var(--faint); margin-top: 6px; }
+</style>
+</head>
+<body class="brochure">
+
+<!-- ================================================================ 1 · COVER -->
+<section class="page cover">
+  <div class="page-head">
+    <div class="brandmark big"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="chip">For Mac · macOS 27</span>
+  </div>
+
+  <div class="eyebrow">The home theater app for Mac</div>
+  <h1>Your movies.<br><span class="accent">Your theater.</span></h1>
+  <p class="lede">Ultimate Theater turns the movies and TV shows on your Mac, your drives and your NAS into a personal streaming service. It has its own playback engine, finds artwork and episode guides automatically, has a profile for everyone in the household, and casts to the TVs in your home.</p>
+
+  <figure class="hero glass-frame"><img src="../images/01-home.jpg" alt="Ultimate Theater Home screen with the featured carousel and Continue Watching"></figure>
+
+  <div class="chips">
+    <span class="chip accent">Plays MKV · AVI · MP4 · TS · VOB · WebM</span>
+    <span class="chip">Dolby TrueHD · DTS · Dolby Vision</span>
+    <span class="chip">Profiles &amp; parental controls</span>
+    <span class="chip">AirPlay · Google Cast · DLNA · Roku</span>
+    <span class="chip gold">iPhone remote</span>
+  </div>
+
+  <div class="page-foot"><span>Ultimate Theater 1.0</span><span>Your movies. Your theater.</span></div>
+</section>
+
+<!-- ================================================================ 2 · ENGINE -->
+<section class="page">
+  <div class="page-head">
+    <div class="brandmark"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="folio">The Theater engine</span>
+  </div>
+
+  <div class="eyebrow">Built from the ground up</div>
+  <h2 class="mt-s">Its own engine.<br>Your whole collection.</h2>
+  <p class="lede">Every file plays in the Theater engine, written for Ultimate Theater on Apple's own media frameworks. You don't need codec packs, file conversions or a second app.</p>
+
+  <div class="row mt-m" style="grid-template-columns: 4.55in 1fr;">
+    <figure class="shot"><div class="glass-frame"><img src="../images/08-player.jpg" alt="The player: title info and transport controls in one glass bar"></div><figcaption>The player: the title's info and every control in one glass bar.</figcaption></figure>
+    <div class="grid" style="gap: 9px; align-content: start;">
+      <div class="glass stat statline"><div class="n accent">12</div><div class="l">types of video file, read by the app's own readers</div></div>
+      <div class="glass stat statline"><div class="n accent">6</div><div class="l">decoders written for the app: DTS, TrueHD, MPEG-4, VP8, Theora and DV</div></div>
+      <div class="glass stat statline"><div class="n accent">0</div><div class="l">third-party libraries. It's built only on Apple's own frameworks</div></div>
+      <div class="glass feature"><div class="icon gold"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 6l3 3"/></svg></div><h3>Repairs damaged files</h3><p>Finds missing indexes, cut-off endings and lost sync, and saves a repaired copy. Your original file is never changed.</p></div>
+    </div>
+  </div>
+
+  <div class="row mt-m" style="grid-template-columns: 1fr 1fr;">
+    <div class="glass format-panel">
+      <h3>Containers</h3>
+      <p>Read by the app's own file readers.</p>
+      <div class="chips">
+        <span class="chip">MKV</span><span class="chip">WebM</span><span class="chip">AVI</span><span class="chip">MP4 / M4V</span><span class="chip">MOV</span><span class="chip">3GP</span><span class="chip">MPEG-TS</span><span class="chip">M2TS / AVCHD</span><span class="chip">MPG / VOB</span><span class="chip">Ogg</span><span class="chip">FLV</span><span class="chip">DV</span>
+      </div>
+    </div>
+    <div class="glass format-panel">
+      <h3>Video</h3>
+      <p>HDR10, HLG and Dolby Vision included.</p>
+      <div class="chips">
+        <span class="chip accent">HEVC · HDR10 · HLG · Dolby Vision</span><span class="chip">H.264</span><span class="chip">AV1</span><span class="chip">VP9</span><span class="chip">VP8</span><span class="chip">MPEG-2</span><span class="chip">MPEG-4 ASP (Xvid/DivX)</span><span class="chip">Theora</span><span class="chip">ProRes</span><span class="chip">DV</span>
+      </div>
+    </div>
+    <div class="glass format-panel">
+      <h3>Audio</h3>
+      <p>Lossless theater sound, decoded on your Mac.</p>
+      <div class="chips">
+        <span class="chip accent">Dolby TrueHD (lossless)</span><span class="chip accent">DTS</span><span class="chip">Dolby Digital</span><span class="chip">Dolby Digital Plus</span><span class="chip">FLAC</span><span class="chip">Opus</span><span class="chip">AAC</span><span class="chip">Apple Lossless</span><span class="chip">Vorbis</span><span class="chip">MP3</span><span class="chip">LPCM</span>
+      </div>
+    </div>
+    <div class="glass format-panel">
+      <h3>Subtitles</h3>
+      <p>Disc subtitles appear exactly where the disc puts them.</p>
+      <div class="chips">
+        <span class="chip accent">Blu-ray PGS</span><span class="chip accent">DVD VobSub</span><span class="chip">DVB</span><span class="chip">Teletext</span><span class="chip">SRT</span><span class="chip">ASS / SSA</span><span class="chip">WebVTT</span><span class="chip">MP4 text</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="page-foot"><span>Ultimate Theater 1.0</span><span>02</span></div>
+</section>
+
+<!-- ================================================================ 3 · LIBRARY -->
+<section class="page">
+  <div class="page-head">
+    <div class="brandmark"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="folio">Your library</span>
+  </div>
+
+  <div class="eyebrow">Organized for you</div>
+  <h2 class="mt-s">Your library,<br>beautifully organized.</h2>
+  <p class="lede">Add a folder and Ultimate Theater does the rest. It identifies every movie and episode, and brings in posters, cast lists, ratings, trailers and episode guides.</p>
+
+  <div class="row mt-m" style="grid-template-columns: 1fr 1fr;">
+    <figure class="shot"><div class="glass-frame"><img src="../images/02-movies.jpg" alt="Movies grid"></div><figcaption>Filter by genre, year, rating, studio, writer, director, actors or your own rating. Then jump with the A–Z bar.</figcaption></figure>
+    <figure class="shot"><div class="glass-frame"><img src="../images/04-collections.jpg" alt="Collections and Made for You"></div><figcaption>Movie series are grouped automatically, and Made for You collections are built from what you watch.</figcaption></figure>
+  </div>
+
+  <figure class="shot mt-s"><div class="glass-frame"><img class="crop" style="height: 1.1in; object-position: 50% 53%;" src="../images/07-title.jpg" alt="A title page"></div><figcaption>Title pages: scores from IMDb, TMDB and TVmaze, your own star rating, the tagline and the synopsis.</figcaption></figure>
+
+  <div class="grid cols-3 mt-m tight">
+    <div class="glass feature">
+      <div class="icon blue"><svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/></svg></div>
+      <h3>Details, automatically</h3>
+      <p>Information comes from TMDB, OMDb, TVmaze and Wikipedia: artwork, cast, synopses, trailers, and scores from IMDb, Rotten Tomatoes and Metacritic.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon purple"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg></div>
+      <h3>Collections that build themselves</h3>
+      <p>Movie series show what you have and what's missing. Smart collections cover In Progress, Recently Watched, Unwatched, Highly Rated and each decade.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg></div>
+      <h3>Watched folders and NAS</h3>
+      <p>New videos on your drives and network shares are found automatically and wait for the administrator to approve them. Rescan whenever you like.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon gold"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg></div>
+      <h3>Find anything</h3>
+      <p>Search movies, shows, people and genres. Sort by date added, A–Z, release date, top rated, or your own rating.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 6l3 3"/></svg></div>
+      <h3>Fix Match and Edit Info</h3>
+      <p>If a title is matched to the wrong movie, fix it in seconds. Edit any details, and lock them so a refresh doesn't undo your changes.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon blue"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg></div>
+      <h3>Title pages made for watching</h3>
+      <p>Resume or Start Over, My List, Mark Watched, trailers, your own star rating, and the audio and subtitle tracks you choose.</p>
+    </div>
+  </div>
+
+  <div class="page-foot"><span>Ultimate Theater 1.0</span><span>03</span></div>
+</section>
+
+<!-- ================================================================ 4 · WATCHING -->
+<section class="page">
+  <div class="page-head">
+    <div class="brandmark"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="folio">The player</span>
+  </div>
+
+  <div class="eyebrow">Made for binge nights</div>
+  <h2 class="mt-s">Press play.<br>We'll handle the rest.</h2>
+  <p class="lede">The controls sit in one glass bar and step aside while you watch. The intro and credits can be skipped, and the next episode is already lined up.</p>
+
+  <div class="row mt-m" style="grid-template-columns: 1fr 1fr;">
+    <figure class="shot"><div class="glass-frame"><img class="crop" style="height: 1.86in; object-position: 50% 100%;" src="../images/09-synopsis.jpg" alt="Synopsis panel"></div><figcaption>Hover over the title to see the synopsis.</figcaption></figure>
+    <figure class="shot"><div class="glass-frame"><img class="crop" style="height: 1.86in; object-position: 50% 22%;" src="../images/10-episodes.jpg" alt="Episodes panel"></div><figcaption>Every season and episode, without leaving the player.</figcaption></figure>
+    <figure class="shot"><div class="glass-frame"><img class="crop" style="height: 1.86in; object-position: 50% 86%;" src="../images/11-player-paused.jpg" alt="Paused screen"></div><figcaption>When you pause, the details appear over the picture.</figcaption></figure>
+    <figure class="shot"><div class="glass-frame"><img class="crop" style="height: 1.86in; object-position: 0% 100%;" src="../images/13-pip.jpg" alt="Picture in picture"></div><figcaption>Picture-in-picture docks in the sidebar while you browse.</figcaption></figure>
+  </div>
+
+  <div class="grid cols-3 mt-m">
+    <div class="glass feature">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 5l8 7-8 7z"/><path d="M12 5l8 7-8 7z"/></svg></div>
+      <h3>Skip Intro and Skip Credits</h3>
+      <p>Intros and credits are found from chapter names, or by comparing each episode's sound with the episodes around it. Press S to skip.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon purple"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/><path d="M16 15l5 3-5 3z"/></svg></div>
+      <h3>Up Next and autoplay</h3>
+      <p>The next episode starts after a 15-second countdown. After three episodes with nobody touching anything, the app asks "Are you still watching?"</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon blue"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 11h3M7 14h5M14 11h3M15 14h2"/></svg></div>
+      <h3>Subtitles in any language</h3>
+      <p>Use the subtitles in the file or next to it, or find and download new ones from OpenSubtitles.com. Files that match yours exactly are marked.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon gold"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="6" rx="1"/></svg></div>
+      <h3>Picture in picture and the Dock</h3>
+      <p>Keep watching while you browse. When you minimize the window, the Dock icon shows the live picture, and the Dock menu has playback controls.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon green"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z"/></svg></div>
+      <h3>No screen saver mid-scene</h3>
+      <p>While a video plays, the display stays awake and the screen won't lock. Normal sleep comes back as soon as you pause.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 017-2.6A4 4 0 0119 10c0 5.6-7 10-7 10z"/></svg></div>
+      <h3>Favourite scenes</h3>
+      <p>Press B to save a moment, then play it again from the title's page. Media keys, Now Playing and keyboard shortcuts all work.</p>
+    </div>
+  </div>
+
+  <div class="page-foot"><span>Ultimate Theater 1.0</span><span>04</span></div>
+</section>
+
+<!-- ================================================================ 5 · HOUSEHOLD -->
+<section class="page">
+  <div class="page-head">
+    <div class="brandmark"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="folio">The household</span>
+  </div>
+
+  <div class="row" style="grid-template-columns: 1fr 2.45in; align-items: end;">
+    <div>
+      <div class="eyebrow">Everyone gets their own</div>
+      <h2 class="mt-s">One theater.<br>A profile for everyone.</h2>
+      <p class="lede">Each profile has its own My List, its own progress, its own ratings and its own Watch Stats. Content limits keep children's profiles to what they're allowed to watch.</p>
+    </div>
+    <figure class="shot"><div class="glass-frame"><img class="crop" style="height: 1.95in; object-position: 50% 46%;" src="../images/12-profiles.jpg" alt="Who's watching? profile picker"></div></figure>
+  </div>
+
+  <div class="row mt-m" style="grid-template-columns: 1fr 1fr;">
+    <figure class="shot"><div class="glass-frame"><img src="../images/05-stats.jpg" alt="Watch Stats"></div><figcaption>Watch Stats: time watched, the last 12 weeks, favourite genres, and what's in progress.</figcaption></figure>
+    <figure class="shot"><div class="glass-frame"><img src="../images/15-settings.jpg" alt="Parental Controls settings"></div><figcaption>Parental Controls follow your country's ratings. The crown marks the administrator.</figcaption></figure>
+  </div>
+
+  <div class="grid cols-3 mt-m">
+    <div class="glass feature">
+      <div class="icon gold"><svg viewBox="0 0 24 24"><path d="M3 18h18l-2-10-4.5 4L12 5l-2.5 7L5 8z"/></svg></div>
+      <h3>One administrator</h3>
+      <p>The administrator, marked with a gold crown, adds and approves media and manages the library. Everyone else just watches.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></div>
+      <h3>PINs where you want them</h3>
+      <p>Lock any profile with its own PIN. The administrator PIN protects profiles and settings, and repeated wrong guesses lock the PIN pad for longer each time.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon green"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+      <h3>Ratings for 48 countries</h3>
+      <p>There are four limits: Little Kids, Older Kids, Teens and All Ratings. They follow your country's rating system, from MPA and TV ratings to BBFC, FSK and more.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg></div>
+      <h3>Continue Watching</h3>
+      <p>Progress is saved for each profile, so everyone picks up where they left off. Mark titles, seasons or single episodes as watched with one click.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon purple"><svg viewBox="0 0 24 24"><path d="M5 20V10M10 20V4M15 20v-7M20 20v-11"/></svg></div>
+      <h3>Watch Stats</h3>
+      <p>Movies finished, episodes and shows completed, hours watched each week, favourite genres, and the most-watched shows.</p>
+    </div>
+    <div class="glass feature">
+      <div class="icon gold"><svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/></svg></div>
+      <h3>Lists and your own ratings</h3>
+      <p>My List for what's next, half-star ratings of your own, and favourite scenes you can play again at any time.</p>
+    </div>
+  </div>
+
+  <div class="page-foot"><span>Ultimate Theater 1.0</span><span>05</span></div>
+</section>
+
+<!-- ================================================================ 6 · BIG SCREEN, REQUIREMENTS, FINE PRINT -->
+<section class="page">
+  <div class="page-head">
+    <div class="brandmark"><span class="mark"></span><b>ULTIMATE</b> THEATER</div>
+    <span class="folio">Big screen · Remote · Privacy</span>
+  </div>
+
+  <div class="eyebrow">Beyond the Mac</div>
+  <h2 class="mt-s">Watch on the big screen.</h2>
+  <p class="lede">Send what's playing to the TV. Each device is checked first, so you know whether it can play the file. Nothing is converted: the TV streams the original file straight from your Mac, through a private link that stops working when casting ends.</p>
+
+  <div class="row mt-m" style="grid-template-columns: 1.95in 1fr; align-items: start;">
+    <figure class="shot"><div class="glass-frame"><img src="../images/14-cast.jpg" alt="Cast menu"></div></figure>
+    <div class="grid cols-2" style="gap: 10px;">
+      <div class="glass family"><h3>AirPlay</h3><p>Video goes to an Apple TV for MP4 and MOV files with H.264 or HEVC. For every other file, the sound can still go to any AirPlay speaker.</p></div>
+      <div class="glass family"><h3>Google Cast</h3><p>Chromecast, Google TV, and TVs with Cast built in. Plays MP4, MOV and WebM files, and HEVC on newer models.</p></div>
+      <div class="glass family"><h3>DLNA smart TVs</h3><p>Most Samsung, LG, Sony, Panasonic and Philips TVs, Xbox, and many receivers, depending on the formats each one accepts.</p></div>
+      <div class="glass family"><h3>Roku</h3><p>Roku players and Roku TVs. Plays MP4, MOV and MKV files with H.264 video, and HEVC on 4K models.</p></div>
+    </div>
+  </div>
+
+  <div class="row mt-m" style="grid-template-columns: 2.75in 1fr; align-items: center;">
+    <figure class="shot"><div class="glass-frame"><img src="../images/18-settings-remote.jpg" alt="iPhone Remote settings (pairing details hidden)"></div></figure>
+    <div>
+      <h3 style="font-size: 17px;">Your iPhone is the remote.</h3>
+      <p style="margin-top: 4px;">Pair a phone in seconds with a QR code. Then play and pause, skip, change audio and subtitles, or start something from Continue Watching. There's no app to install, and it works only on your Wi-Fi.</p>
+      <h3 style="font-size: 17px; margin-top: 12px;">Private by design.</h3>
+      <ul class="ticks">
+        <li>No accounts, no ads, no analytics, no tracking.</li>
+        <li>Profiles, history and ratings stay on your Mac.</li>
+        <li>Only titles, years and episode numbers are sent to look up information. Nothing about you is sent.</li>
+        <li>API keys and the administrator PIN are kept in your Keychain.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="glass req mt-m">
+    <div><div class="k">System requirements</div><div class="v">macOS 27.0 or later<span>Any Mac that runs macOS 27</span></div></div>
+    <div><div class="k">Your media</div><div class="v">Mac, external drives or NAS<span>SMB, AFP and NFS shares</span></div></div>
+    <div><div class="k">Information</div><div class="v">Internet connection<span>Free TMDB and OMDb keys recommended</span></div></div>
+    <div><div class="k">Optional</div><div class="v">OpenSubtitles key, iPhone, TV<span>For subtitles, the remote, casting</span></div></div>
+  </div>
+
+  <div class="fine fineprint mt-s">
+    <div class="tmdb"><img src="../images/tmdb-logo.svg" alt="TMDB"><strong>This application uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.</strong></div>
+    <div class="cols">
+      <p><strong>TVmaze:</strong> TV show and episode information from TVmaze, licensed under CC BY-SA 4.0. <strong>Wikipedia:</strong> synopses and images by Wikipedia contributors; text licensed under CC BY-SA 4.0, images under their own licences. <strong>OMDb:</strong> ratings from the OMDb API, whose terms allow personal, non-commercial use only. IMDb, Rotten Tomatoes and Metacritic are trademarks of their respective owners. <strong>OpenSubtitles:</strong> downloaded subtitles come from OpenSubtitles.com, are contributed by its community, and are subject to its terms of service; a free API key from the user is required. Trailers play from YouTube and Vimeo, and are subject to those services' terms.</p>
+      <p><strong>Content ratings</strong> come from each country's rating authority, as published by TMDB and OMDb. Ultimate Theater isn't affiliated with or endorsed by any rating authority. G, PG, PG-13, R and NC-17 are certification marks of the Motion Picture Association (MPA); film ratings are assigned by the Classification and Rating Administration (filmratings.com). TV-Y, TV-Y7, TV-G, TV-PG, TV-14 and TV-MA are TV Parental Guidelines ratings, administered by the TV Parental Guidelines Monitoring Board (tvguidelines.org). Apple, Mac, macOS, AirPlay, Apple TV and iPhone are trademarks of Apple Inc.; Google Cast and Chromecast of Google LLC; Roku of Roku, Inc.; Dolby, Dolby Vision and Dolby TrueHD of Dolby Laboratories; DTS of DTS, Inc. Movie and TV artwork shown belongs to its respective rights holders. Ultimate Theater 1.0 is a development build.</p>
+    </div>
+  </div>
+
+  <div class="page-foot"><span>© 2026 John Aldrich. All rights reserved.</span><span>github.com/jaldrich2023/UltimateTheater</span></div>
+</section>
+
+</body>
+</html>

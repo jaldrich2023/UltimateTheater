@@ -25,6 +25,64 @@ nonisolated enum MediaFormatError: LocalizedError {
     }
 }
 
+/// Checks on container-supplied numbers before they become Core Media's fixed-width fields,
+/// so a damaged header is reported instead of crashing the conversion.
+nonisolated enum FormatValidation {
+    /// Largest picture dimension accepted (16K).
+    static let maximumDimension = 16_384
+    static let maximumChannels = 64
+
+    /// A picture dimension in Core Media's range; nil for negative or oversized values.
+    static func dimension(_ value: Int) -> Int32? {
+        (0...maximumDimension).contains(value) ? Int32(value) : nil
+    }
+
+    /// The channel count for an audio description: missing or zero counts as stereo/mono as before.
+    static func channels(_ value: Int?) -> UInt32? {
+        let channels = max(value ?? 2, 1)
+        return channels <= maximumChannels ? UInt32(channels) : nil
+    }
+
+    /// A picture dimension stored as a number (FLV metadata), truncated; nil for non-finite,
+    /// negative, or oversized values.
+    static func dimension(_ value: Double) -> Int? {
+        guard let whole = Int(exactly: value.rounded(.towardZero)), dimension(whole) != nil else { return nil }
+        return whole
+    }
+
+    /// Longest duration or time accepted from a file (about 115 days); beyond it is damage.
+    static let maximumDuration: Double = 1e7
+
+    /// A usable duration in seconds: finite, non-negative, and at most `maximumDuration`.
+    static func duration(_ seconds: Double?) -> Double? {
+        guard let seconds, seconds.isFinite, seconds >= 0, seconds <= maximumDuration else { return nil }
+        return seconds
+    }
+
+    /// A usable sample rate: finite, positive, and within a CMTimeScale.
+    static func isValidSampleRate(_ rate: Double) -> Bool {
+        rate.isFinite && rate >= 1 && rate <= Double(Int32.max)
+    }
+
+    /// The timescale counting one tick per sample, or nil for an unusable rate.
+    static func timescale(forSampleRate rate: Double) -> CMTimeScale? {
+        guard isValidSampleRate(rate) else { return nil }
+        return CMTimeScale(clamping: Int(rate))
+    }
+
+    /// Frames in one ADPCM block. IMA blocks hold one header sample per channel plus two
+    /// per byte after the 4-byte channel headers; Microsoft ADPCM two header samples plus two
+    /// per byte after 7-byte headers. A declared `samplesPerBlock` wins when it's positive.
+    static func adpcmFramesPerPacket(isIMA: Bool, blockAlign: Int, channels: Int, samplesPerBlock: Int?) -> UInt32? {
+        guard blockAlign > 0, channels > 0 else { return nil }
+        if let samplesPerBlock, samplesPerBlock > 0 { return UInt32(exactly: samplesPerBlock) }
+        let header = (isIMA ? 4 : 7) * channels
+        guard blockAlign >= header else { return nil }
+        let frames = (blockAlign - header) * 2 / channels + (isIMA ? 1 : 2)
+        return UInt32(exactly: frames)
+    }
+}
+
 /// A gapless audio timeline. Each buffer starts exactly where the previous one ended,
 /// unless the container's time jumps by more than `tolerance` (a seek, splice, or real gap).
 nonisolated struct AudioClock {
@@ -53,6 +111,14 @@ nonisolated final class TrackFormatter {
     private var dtsFramer: DTSFramer?
     private var dtsDecoder: DTSCoreDecoder?
     private var dtsLayout: (speakers: [DTSCoreDecoder.Speaker], sampleRate: Double)?
+    /// TrueHD has no system decoder either: lossless decoding to float PCM here.
+    private var trueHDFramer: TrueHDFramer?
+    private var trueHDDecoder: TrueHDDecoder?
+    private var trueHDLayout: (speakers: [TrueHDDecoder.Speaker], sampleRate: Double)?
+    /// MPEG-4 Part 2 is decoded here too (VideoToolbox can't decode B-VOPs or Advanced Simple
+    /// Profile). Pictures come out in display order; they take the input times in sorted order.
+    private var mpeg4Decoder: MPEG4Decoder?
+    private var pendingTimes: [Double] = []
     /// True when video payloads must be rewritten from start codes to length prefixes.
     private var convertsAnnexB = false
 
@@ -63,6 +129,10 @@ nonisolated final class TrackFormatter {
         case .video:
             if track.codec == .vp8 {
                 softwareVideo = VP8Decoder()
+                break
+            }
+            if track.codec == .mpeg4Part2 {
+                mpeg4Decoder = MPEG4Decoder(configuration: track.codecPrivate)
                 break
             }
             if track.codec == .theora {
@@ -93,6 +163,11 @@ nonisolated final class TrackFormatter {
                 dtsDecoder = DTSCoreDecoder()
                 break
             }
+            if track.codec == .trueHD {
+                trueHDFramer = TrueHDFramer()
+                trueHDDecoder = TrueHDDecoder()
+                break
+            }
             format = try Self.audioFormat(for: track, firstPacket: nil)
             if track.needsFraming, [.mp3, .mp2, .ac3, .eac3, .aac].contains(track.codec) {
                 framer = AudioFramer(codec: track.codec, verifiesFrames: track.verifiesFrames)
@@ -109,6 +184,10 @@ nonisolated final class TrackFormatter {
         vorbis?.reset()
         dtsFramer?.reset()
         softwareVideo?.reset()
+        trueHDFramer?.reset()
+        trueHDDecoder?.reset()
+        mpeg4Decoder?.reset()
+        pendingTimes.removeAll()
         dtsDecoder?.reset()
         audioClock = nil
     }
@@ -140,6 +219,7 @@ nonisolated final class TrackFormatter {
     func sampleBuffers(for packet: MediaPacket) throws -> [CMSampleBuffer] {
         switch track.kind {
         case .video:
+            if let mpeg4Decoder { return try decodedMPEG4(packet, decoder: mpeg4Decoder) }
             if let softwareVideo {
                 // A damaged frame is skipped; the decoder resumes at the next keyframe.
                 guard let picture = try? softwareVideo.decode(packet.data) else { return [] }
@@ -165,6 +245,7 @@ nonisolated final class TrackFormatter {
 
         case .audio:
             if let dtsDecoder { return try decodedDTS(packet, decoder: dtsDecoder) }
+            if let trueHDDecoder { return try decodedTrueHD(packet, decoder: trueHDDecoder) }
             guard let format else { return [] }
             if var framer {
                 // Chunks don't align to frames: the chunk time anchors the first frame only.
@@ -227,6 +308,49 @@ nonisolated final class TrackFormatter {
 
         case .subtitle:
             return []
+        }
+    }
+
+    /// Decodes TrueHD access units to float PCM buffers.
+    private func decodedTrueHD(_ packet: MediaPacket, decoder: TrueHDDecoder) throws -> [CMSampleBuffer] {
+        guard var framer = trueHDFramer else { return [] }
+        let units = framer.push(packet.data)
+        trueHDFramer = framer
+        var buffers: [CMSampleBuffer] = []
+        for (index, unit) in units.enumerated() {
+            guard let output = decoder.decode(unit), output.frameCount > 0 else { continue }
+            if format == nil || trueHDLayout?.speakers != output.channels || trueHDLayout?.sampleRate != output.sampleRate {
+                format = try Self.floatPCMFormat(sampleRate: output.sampleRate, labels: output.channels.map(\.channelLabel))
+                trueHDLayout = (output.channels, output.sampleRate)
+            }
+            guard let format else { continue }
+            let duration = Double(output.frameCount) / output.sampleRate
+            let time = index == 0 ? continuousTime(packet.pts, duration: duration)
+                                  : continuousTime(audioClock?.next ?? packet.pts, duration: duration)
+            let data = output.samples.withUnsafeBytes { Data($0) }
+            buffers.append(try Self.pcmSample(data, format: format, pts: time))
+        }
+        return buffers
+    }
+
+    /// Decodes an MPEG-4 Part 2 frame (or DivX packed pair) into display-order pictures.
+    private func decodedMPEG4(_ packet: MediaPacket, decoder: MPEG4Decoder) throws -> [CMSampleBuffer] {
+        // Each container frame is one display slot (AVI placeholders included), so the
+        // pictures take the packets' times in ascending order.
+        pendingTimes.append(packet.pts)
+        pendingTimes.sort()
+        if pendingTimes.count > 16 { pendingTimes.removeFirst(pendingTimes.count - 16) }
+        guard let pictures = try? decoder.decode(packet.data) else { return [] }
+        return try pictureSamples(pictures)
+    }
+
+    private func pictureSamples(_ pictures: [DecodedPicture]) throws -> [CMSampleBuffer] {
+        try pictures.compactMap { picture in
+            guard !pendingTimes.isEmpty else { return nil }
+            let time = pendingTimes.removeFirst()
+            let sample = try picture.sampleBuffer(pts: time, duration: track.frameDuration)
+            format = CMSampleBufferGetFormatDescription(sample)
+            return sample
         }
     }
 
@@ -327,8 +451,11 @@ nonisolated final class TrackFormatter {
             extensions[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = atoms.mapValues { $0 as NSData }
         }
         var description: CMFormatDescription?
+        guard let codedWidth = FormatValidation.dimension(width), let codedHeight = FormatValidation.dimension(height) else {
+            throw MediaFormatError.unsupportedCodec("\(width)×\(height) video")
+        }
         let status = CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: codec,
-                                                    width: Int32(width), height: Int32(height),
+                                                    width: codedWidth, height: codedHeight,
                                                     extensions: extensions.isEmpty ? nil : extensions as CFDictionary,
                                                     formatDescriptionOut: &description)
         guard status == noErr, let description else { throw MediaFormatError.coreMedia(status) }
@@ -366,7 +493,9 @@ nonisolated final class TrackFormatter {
 
     static func audioFormat(for track: ContainerTrack, firstPacket: Data?) throws -> CMFormatDescription {
         let sampleRate = track.sampleRate ?? 48000
-        let channels = UInt32(max(track.channels ?? 2, 1))
+        guard let channels = FormatValidation.channels(track.channels) else {
+            throw MediaFormatError.missingConfiguration(track.codec.displayName)
+        }
         var asbd = AudioStreamBasicDescription(mSampleRate: sampleRate, mFormatID: 0, mFormatFlags: 0,
                                                mBytesPerPacket: 0, mFramesPerPacket: 0, mBytesPerFrame: 0,
                                                mChannelsPerFrame: channels, mBitsPerChannel: 0, mReserved: 0)
@@ -419,12 +548,14 @@ nonisolated final class TrackFormatter {
             asbd.mFormatID = 0x766F_7262 // 'vorb'
             cookie = config
         case .adpcmIMA, .adpcmMS:
-            guard let blockAlign = track.blockAlign, blockAlign > 0 else { throw MediaFormatError.missingConfiguration(track.codec.displayName) }
+            guard let blockAlign = track.blockAlign, let bytesPerPacket = UInt32(exactly: blockAlign),
+                  let frames = FormatValidation.adpcmFramesPerPacket(isIMA: track.codec == .adpcmIMA, blockAlign: blockAlign,
+                                                                      channels: Int(channels), samplesPerBlock: track.samplesPerBlock) else {
+                throw MediaFormatError.missingConfiguration(track.codec.displayName)
+            }
             asbd.mFormatID = track.codec == .adpcmIMA ? 0x6D73_0011 : 0x6D73_0002 // 'ms\0\x11' / 'ms\0\x02'
-            asbd.mBytesPerPacket = UInt32(blockAlign)
-            // IMA blocks hold one header sample plus two per byte after the per-channel headers.
-            asbd.mFramesPerPacket = UInt32(track.samplesPerBlock
-                ?? (track.codec == .adpcmIMA ? (blockAlign - 4 * Int(channels)) * 2 / Int(channels) + 1 : (blockAlign - 7 * Int(channels)) * 2 / Int(channels) + 2))
+            asbd.mBytesPerPacket = bytesPerPacket
+            asbd.mFramesPerPacket = frames
             if track.codec == .adpcmMS { cookie = track.codecPrivate }
         case .appleIMA4:
             asbd.mFormatID = kAudioFormatAppleIMA4
@@ -448,6 +579,7 @@ nonisolated final class TrackFormatter {
             asbd.mFormatID = kAudioFormatMPEGLayer2
             asbd.mFramesPerPacket = 1152
         case .pcm(let bits, let isFloat, let isBigEndian):
+            guard (8...64).contains(bits) else { throw MediaFormatError.unsupportedCodec("\(bits)-bit PCM") }
             asbd.mFormatID = kAudioFormatLinearPCM
             asbd.mFormatFlags = kAudioFormatFlagIsPacked
                 | (isFloat ? kAudioFormatFlagIsFloat : (bits > 8 ? kAudioFormatFlagIsSignedInteger : 0))
@@ -458,6 +590,10 @@ nonisolated final class TrackFormatter {
             asbd.mFramesPerPacket = 1
         default:
             throw MediaFormatError.unsupportedCodec(track.codec.displayName)
+        }
+        // Some codecs take their rate from the stream setup rather than the container.
+        guard FormatValidation.isValidSampleRate(asbd.mSampleRate) else {
+            throw MediaFormatError.missingConfiguration(track.codec.displayName)
         }
 
         var description: CMFormatDescription?
@@ -479,11 +615,6 @@ nonisolated final class TrackFormatter {
 
     /// Interleaved 32-bit float PCM with an explicit speaker layout.
     static func floatPCMFormat(sampleRate: Double, speakers: [DTSCoreDecoder.Speaker]) throws -> CMFormatDescription {
-        let channels = UInt32(speakers.count)
-        var asbd = AudioStreamBasicDescription(mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
-                                               mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                                               mBytesPerPacket: 4 * channels, mFramesPerPacket: 1, mBytesPerFrame: 4 * channels,
-                                               mChannelsPerFrame: channels, mBitsPerChannel: 32, mReserved: 0)
         let labels: [AudioChannelLabel] = speakers.map { speaker in
             switch speaker {
             case .left: kAudioChannelLabel_Left
@@ -495,6 +626,16 @@ nonisolated final class TrackFormatter {
             case .surround: kAudioChannelLabel_CenterSurround
             }
         }
+        return try floatPCMFormat(sampleRate: sampleRate, labels: labels)
+    }
+
+    /// Interleaved 32-bit float PCM whose channels carry these speaker labels, in order.
+    static func floatPCMFormat(sampleRate: Double, labels: [AudioChannelLabel]) throws -> CMFormatDescription {
+        let channels = UInt32(labels.count)
+        var asbd = AudioStreamBasicDescription(mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+                                               mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                                               mBytesPerPacket: 4 * channels, mFramesPerPacket: 1, mBytesPerFrame: 4 * channels,
+                                               mChannelsPerFrame: channels, mBitsPerChannel: 32, mReserved: 0)
         // AudioChannelLayout ends in a variable-length array of channel descriptions.
         let offset = MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions) ?? 12
         let size = offset + labels.count * MemoryLayout<AudioChannelDescription>.stride
@@ -570,8 +711,8 @@ nonisolated final class TrackFormatter {
         for (index, packet) in packets.enumerated() {
             descriptions.append(AudioStreamPacketDescription(
                 mStartOffset: Int64(data.count),
-                mVariableFramesInPacket: UInt32(variableFrames.map { index < $0.count ? $0[index] : 0 } ?? 0),
-                mDataByteSize: UInt32(packet.count)))
+                mVariableFramesInPacket: UInt32(clamping: variableFrames.map { index < $0.count ? $0[index] : 0 } ?? 0),
+                mDataByteSize: UInt32(clamping: packet.count)))
             data.append(packet)
         }
         let block = try blockBuffer(data)
@@ -586,12 +727,13 @@ nonisolated final class TrackFormatter {
     }
 
     static func pcmSample(_ data: Data, format: CMFormatDescription, pts: Double) throws -> CMSampleBuffer {
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee, asbd.mBytesPerFrame > 0 else {
+        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee, asbd.mBytesPerFrame > 0,
+              let timescale = FormatValidation.timescale(forSampleRate: asbd.mSampleRate) else {
             throw MediaFormatError.coreMedia(-1)
         }
         let frames = data.count / Int(asbd.mBytesPerFrame)
         let block = try blockBuffer(data.prefix(frames * Int(asbd.mBytesPerFrame)))
-        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: CMTimeScale(asbd.mSampleRate)),
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: timescale),
                                         presentationTimeStamp: time(pts), decodeTimeStamp: .invalid)
         var size = Int(asbd.mBytesPerFrame)
         var sample: CMSampleBuffer?

@@ -20,6 +20,10 @@ struct LibraryManagerView: View {
     @State private var selection = Set<Title.ID>()
     @State private var sortOrder = [KeyPathComparator(\LibraryRow.dateAdded, order: .reverse)]
     @State private var pendingRemoval: [Title] = []
+    /// Found videos waiting on "Ignore?".
+    @State private var pendingIgnore: [PendingMedia] = []
+    /// The watched folder waiting on "Stop watching?".
+    @State private var removingFolder: LibraryFolder?
 
     private var library: MediaLibrary { model.library }
 
@@ -33,7 +37,7 @@ struct LibraryManagerView: View {
                 case .attention: title.needsMatch || !title.isPlayable
                 }
             }
-            .map(LibraryRow.init)
+            .map { LibraryRow($0) }
             .sorted(using: sortOrder)
     }
 
@@ -41,7 +45,8 @@ struct LibraryManagerView: View {
         let movies = library.titles.filter { $0.kind == .movie }.count
         let shows = library.titles.filter { $0.kind == .series }
         let episodes = shows.reduce(0) { $0 + $1.allEpisodes.count }
-        return "\(movies) movies · \(shows.count) shows · \(episodes) episodes"
+        return String(AttributedString(localized:
+            "^[\(movies) movie](inflect: true) · ^[\(shows.count) show](inflect: true) · ^[\(episodes) episode](inflect: true)").characters)
     }
 
     var body: some View {
@@ -51,6 +56,11 @@ struct LibraryManagerView: View {
 
             actionBar
                 .padding(.horizontal, pageMargin)
+
+            if !library.pending.isEmpty {
+                approvals
+                    .padding(.horizontal, pageMargin)
+            }
 
             if !library.folders.isEmpty {
                 folders
@@ -76,12 +86,46 @@ struct LibraryManagerView: View {
             isPresented: Binding(get: { !pendingRemoval.isEmpty }, set: { if !$0 { pendingRemoval = [] } })
         ) {
             Button("Remove from Library", role: .destructive) {
-                for title in pendingRemoval { library.remove(title.id) }
-                selection.subtract(pendingRemoval.map(\.id))
+                let titles = pendingRemoval
                 pendingRemoval = []
+                // One PIN for the whole selection.
+                model.manageLibrary(titles.count == 1 ? "Enter the administrator PIN to remove “\(titles[0].name)”."
+                                    : "Enter the administrator PIN to remove \(titles.count) titles.") {
+                    for title in titles {
+                        model.close(title.id)
+                        library.remove(title.id)
+                    }
+                    selection.subtract(titles.map(\.id))
+                }
             }
         } message: {
             Text("The video files stay on your Mac.")
+        }
+        .confirmationDialog(
+            pendingIgnore.count == 1 ? "Ignore “\(pendingIgnore[0].fileName)”?" : "Ignore \(pendingIgnore.count) new videos?",
+            isPresented: Binding(get: { !pendingIgnore.isEmpty }, set: { if !$0 { pendingIgnore = [] } }),
+            titleVisibility: .visible
+        ) {
+            Button(pendingIgnore.count == 1 ? "Ignore Video" : "Ignore All", role: .destructive) {
+                let items = pendingIgnore
+                pendingIgnore = []
+                model.manageLibrary("Enter the administrator PIN to ignore new videos.") {
+                    library.ignorePending(items)
+                }
+            }
+        } message: {
+            Text("Ignored videos aren't added to your library. The files stay on your Mac.")
+        }
+        .confirmationDialog("Stop watching “\(removingFolder?.displayName ?? "")”?",
+                            isPresented: Binding(get: { removingFolder != nil }, set: { if !$0 { removingFolder = nil } }),
+                            titleVisibility: .visible, presenting: removingFolder) { folder in
+            Button("Stop Watching Folder", role: .destructive) {
+                model.manageLibrary("Enter the administrator PIN to stop watching “\(folder.displayName)”.") {
+                    library.removeFolder(folder)
+                }
+            }
+        } message: { _ in
+            Text("New videos in this folder won't be added any more. Titles already in your library stay, and no files are deleted.")
         }
     }
 
@@ -92,10 +136,10 @@ struct LibraryManagerView: View {
             }
             .buttonStyle(.glassProminent)
 
-            Button { Task { await library.rescanFolders() } } label: {
+            Button { model.rescanLibraryFolders() } label: {
                 Label("Rescan Folders", systemImage: "arrow.triangle.2.circlepath")
             }
-            .buttonStyle(.glass)
+            .buttonStyle(.theaterGlass)
             .disabled(library.folders.isEmpty)
 
             Menu {
@@ -113,30 +157,94 @@ struct LibraryManagerView: View {
                     }
                 }
                 Divider()
-                Button("Everything (\(library.titles.count))") { Task { await library.refreshMetadata(force: true) } }
+                Button("Everything (\(library.titles.count))") { model.refreshInfo() }
             } label: {
                 Label("Refresh Info", systemImage: "arrow.clockwise")
             }
             .menuStyle(.button)
-            .buttonStyle(.glass)
+            .buttonStyle(.theaterGlass)
             .fixedSize()
             .disabled(library.titles.isEmpty)
 
             let unmatched = library.titles.filter(\.needsMatch).map(\.id)
             if !unmatched.isEmpty {
-                Button { Task { await library.refreshMetadata(for: unmatched, force: true) } } label: {
+                Button { model.refreshInfo(for: unmatched) } label: {
                     Label("Identify \(unmatched.count) Unmatched", systemImage: "wand.and.stars")
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.theaterGlass)
             }
         }
         .disabled(library.isBusy)
     }
 
+    /// New videos the folder watcher found; they join the library once approved.
+    private var approvals: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Waiting for Approval", systemImage: "tray.and.arrow.down.fill")
+                    .font(.headline)
+                Text("\(library.pending.count)")
+                    .font(.caption.weight(.heavy))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Theme.accent, in: .capsule)
+                Spacer()
+                Button("Ignore All…") { pendingIgnore = library.pending }
+                    .buttonStyle(.theaterGlass)
+                Button("Add All") { approve(library.pending) }
+                    .buttonStyle(.glassProminent)
+            }
+            .disabled(library.isBusy)
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(library.pending) { item in
+                        HStack(spacing: 10) {
+                            Image(systemName: "film")
+                                .foregroundStyle(Theme.accent)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.fileName)
+                                    .font(.callout.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(URL(fileURLWithPath: item.path).deletingLastPathComponent().path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Text("Found \(item.dateFound, format: .relative(presentation: .named))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Ignore…") { pendingIgnore = [item] }
+                                .buttonStyle(.theaterGlass)
+                                .controlSize(.small)
+                            Button("Add") { approve([item]) }
+                                .buttonStyle(.glassProminent)
+                                .controlSize(.small)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+            .disabled(library.isBusy)
+        }
+    }
+
     /// Re-fetches info for just these titles.
     private func refresh(_ ids: [String]) {
-        guard !ids.isEmpty else { return }
-        Task { await library.refreshMetadata(for: ids, force: true) }
+        model.refreshInfo(for: ids)
+    }
+
+    /// Adds found videos to the library (one PIN for all of them).
+    private func approve(_ items: [PendingMedia]) {
+        guard !items.isEmpty else { return }
+        model.manageLibrary(items.count == 1 ? "Enter the administrator PIN to add “\(items[0].fileName)”."
+                            : "Enter the administrator PIN to add \(items.count) videos.") {
+            Task { await library.approvePending(items) }
+        }
     }
 
     private var folders: some View {
@@ -167,18 +275,16 @@ struct LibraryManagerView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
+                    .buttonStyle(.theaterGlassCircle)
                     .disabled(library.isBusy)
                     .help("Refresh info for the titles in this folder")
                     .accessibilityLabel("Refresh info for \(folder.displayName)")
                     Button {
-                        library.removeFolder(folder)
+                        removingFolder = folder
                     } label: {
                         Image(systemName: "minus")
                     }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
+                    .buttonStyle(.theaterGlassCircle)
                     .help("Stop watching this folder (titles stay in your library)")
                     .accessibilityLabel("Stop watching \(folder.displayName)")
                 }
@@ -223,15 +329,15 @@ struct LibraryManagerView: View {
             let titles = library.titles.filter { ids.contains($0.id) }
             if titles.count == 1, let title = titles.first {
                 Button("Open", systemImage: "info.circle") { model.open(title) }
-                Button("Fix Match…", systemImage: "wand.and.stars") { model.matchingTitle = title }
-                Button("Edit Info…", systemImage: "pencil") { model.editingTitle = title }
+                Button("Fix Match…", systemImage: "wand.and.stars") { model.fixMatch(title) }
+                Button("Edit Info…", systemImage: "pencil") { model.editInfo(title) }
                 Button("Show in Finder", systemImage: "folder") {
                     library.revealInFinder(title.allEpisodes.first?.id ?? title.id)
                 }
             }
             if !titles.isEmpty {
                 Button("Refresh Info", systemImage: "arrow.clockwise") {
-                    Task { await library.refreshMetadata(for: titles.map(\.id), force: true) }
+                    model.refreshInfo(for: titles.map(\.id))
                 }
                 .disabled(library.isBusy)
                 Divider()
@@ -259,22 +365,32 @@ struct LibraryManagerView: View {
     }
 }
 
-/// Sortable projection of a title for the library table.
+/// Sortable projection of a title for the library table. The sort keys are plain stored
+/// values (nonisolated), so the table's `KeyPathComparator`s are Sendable.
 struct LibraryRow: Identifiable {
     let title: Title
 
-    var id: String { title.id }
-    var name: String { title.name }
-    var kind: String { title.kind.displayName }
-    var yearSort: Int { title.year ?? 0 }
-    var format: String { ([title.fileFormat] + title.badges.map(\.rawValue)).filter { !$0.isEmpty }.joined(separator: " · ") }
-    var sources: String { title.metadataSources.joined(separator: ", ") }
-    var dateAdded: Date { title.dateAdded }
+    nonisolated let id: String
+    nonisolated let name: String
+    nonisolated let kind: String
+    nonisolated let yearSort: Int
+    nonisolated let format: String
+    nonisolated let sources: String
+    nonisolated let dateAdded: Date
+    nonisolated let status: String
 
-    var status: String {
-        if !title.isPlayable { return "Unsupported" }
-        if title.needsMatch { return "Needs Match" }
-        return title.metadataSources.isEmpty ? "Not Fetched" : "Matched"
+    init(_ title: Title) {
+        self.title = title
+        id = title.id
+        name = title.name
+        kind = title.kind.displayName
+        yearSort = title.year ?? 0
+        format = ([title.fileFormat] + title.badges.map(\.rawValue)).filter { !$0.isEmpty }.joined(separator: " · ")
+        sources = title.metadataSources.joined(separator: ", ")
+        dateAdded = title.dateAdded
+        status = if !title.isPlayable { "Unsupported" }
+            else if title.needsMatch { "Needs Match" }
+            else { title.metadataSources.isEmpty ? "Not Fetched" : "Matched" }
     }
 
     var statusSymbol: String {

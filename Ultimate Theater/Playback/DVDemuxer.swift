@@ -88,7 +88,9 @@ nonisolated final class DVDemuxer: MediaDemuxer {
     @discardableResult
     func seek(to seconds: Double) throws -> Double {
         pending = []
-        frameIndex = max(0, min(frameCount - 1, Int(seconds / frameDuration)))
+        // Clamp in floating point first: a huge or non-finite target would trap converting to Int.
+        let frames = seconds.isFinite ? (seconds / frameDuration).rounded(.towardZero) : 0
+        frameIndex = max(0, min(frameCount - 1, frames >= Double(frameCount) ? frameCount - 1 : Int(max(frames, 0))))
         return Double(frameIndex) * frameDuration
     }
 

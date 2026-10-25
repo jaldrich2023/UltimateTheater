@@ -1,0 +1,43 @@
+{
+  "configurations" : [
+    {
+      "id" : "6F0C2B1E-5D7A-4E0B-9C51-2A8E3F4D1B01",
+      "name" : "Default",
+      "options" : {
+
+      }
+    },
+    {
+      "id" : "6F0C2B1E-5D7A-4E0B-9C51-2A8E3F4D1B02",
+      "name" : "Realtime",
+      "options" : {
+        "environmentVariableEntries" : [
+          {
+            "key" : "UT_RUN_REALTIME_TESTS",
+            "value" : "1"
+          }
+        ]
+      }
+    }
+  ],
+  "defaultOptions" : {
+
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Ultimate Theater.xcodeproj",
+        "identifier" : "585C8BEA30888BBF007FD4A9",
+        "name" : "Ultimate TheaterTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Ultimate Theater.xcodeproj",
+        "identifier" : "585C8BF430888BBF007FD4A9",
+        "name" : "Ultimate TheaterUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

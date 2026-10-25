@@ -14,9 +14,30 @@ struct PINPadView: View {
     @State private var firstEntry: String?
     @State private var errorMessage: String?
     @State private var shakes = 0
+    /// Briefly true after a wrong PIN, so input can't be typed into the cleared dots.
+    @State private var isPaused = false
+    /// When the current lockout ends; drives the countdown.
+    @State private var lockedUntil: Date?
+    /// Seconds until another PIN can be tried (ticks down while locked).
+    @State private var lockRemaining = 0
     @FocusState private var isFocused: Bool
+    /// Whether this prompt checks only the administrator PIN, so the Mac's owner may clear it
+    /// (a forgotten PIN, or one the Keychain can't read).
+    @State private var canResetWithOwner = false
+    @State private var isResetting = false
 
     private static let keypadRows: [[String]] = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]]
+
+    private var isLocked: Bool { lockRemaining > 0 }
+    /// The lockouts for the PIN(s) this prompt checks.
+    private var attempts: PINAttemptGuard { PINAttemptGuard(targets: request.lockoutTargets) }
+    private var acceptsInput: Bool { !isLocked && !isPaused }
+
+    private var lockMessage: String {
+        let minutes = lockRemaining / 60, seconds = lockRemaining % 60
+        let time = minutes > 0 ? String(format: "%d:%02d", minutes, seconds) : "\(seconds) second\(seconds == 1 ? "" : "s")"
+        return "Too many wrong PINs. Try again in \(time)."
+    }
 
     private var prompt: String {
         switch request.kind {
@@ -41,9 +62,10 @@ struct PINPadView: View {
                 Text(prompt)
                     .font(.title2.bold())
                     .contentTransition(.opacity)
-                Text(errorMessage ?? request.message)
+                Text(isLocked ? lockMessage : errorMessage ?? request.message)
                     .font(.callout)
-                    .foregroundStyle(errorMessage == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                    .foregroundStyle(errorMessage == nil && !isLocked ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                    .monospacedDigit()
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -72,15 +94,25 @@ struct PINPadView: View {
                         .frame(width: 64, height: 64)
                     key("0")
                     Button {
-                        if !digits.isEmpty { digits.removeLast() }
+                        if acceptsInput, !digits.isEmpty { digits.removeLast() }
                     } label: {
                         Image(systemName: "delete.left")
                             .font(.title3)
                             .frame(width: 64, height: 64)
                     }
                     .buttonStyle(.plain)
+                    .disabled(!acceptsInput)
                     .accessibilityLabel("Delete")
                 }
+            }
+            if canResetWithOwner {
+                // Needs the Mac's password (or Touch ID); also the way out when the PIN can't be
+                // read, since nothing typed here would ever match it then.
+                Button("Forgot PIN? Use Mac Password…", action: resetWithOwner)
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(Theme.accent)
+                    .disabled(isResetting)
             }
         }
         .padding(36)
@@ -89,13 +121,28 @@ struct PINPadView: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
-        .onAppear { isFocused = true }
+        .onAppear {
+            isFocused = true
+            updateLock()
+            if case .verify = request.kind, request.lockoutTargets == [.administrator], AdministratorPIN.isSet {
+                canResetWithOwner = true
+                if let message = AdministratorPIN.readFailureMessage { errorMessage = message }
+            }
+        }
+        // Counts down while locked; restarts whenever a new lock begins.
+        .task(id: lockedUntil) {
+            while !Task.isCancelled, attempts.isLocked(at: .now) {
+                updateLock()
+                try? await Task.sleep(for: .seconds(1))
+            }
+            updateLock()
+        }
         .onKeyPress(characters: .decimalDigits) { press in
             press.characters.forEach { type(String($0)) }
             return .handled
         }
         .onKeyPress(.delete) {
-            if !digits.isEmpty { digits.removeLast() }
+            if acceptsInput, !digits.isEmpty { digits.removeLast() }
             return .handled
         }
         .onKeyPress(.escape) {
@@ -110,23 +157,44 @@ struct PINPadView: View {
                 .font(.system(size: 26, weight: .medium, design: .rounded))
                 .frame(width: 64, height: 64)
         }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
+        .buttonStyle(.theaterGlassCircle)
+        .disabled(!acceptsInput)
+    }
+
+    private func updateLock() {
+        let now = Date.now
+        lockRemaining = Int(attempts.remaining(at: now).rounded(.up))
+        lockedUntil = attempts.lockedUntil(at: now)
     }
 
     private func type(_ digit: String) {
-        guard digits.count < PINHash.length else { return }
+        guard acceptsInput, digits.count < PINHash.length else { return }
         digits += digit
         errorMessage = nil
         guard digits.count == PINHash.length else { return }
         let entered = digits
         switch request.kind {
         case .verify(let check):
+            // Re-read in case another prompt (or a relaunch) changed it meanwhile.
+            updateLock()
+            guard !isLocked else {
+                digits = ""
+                return
+            }
             if check(entered) {
+                attempts.recordSuccess()
                 finish()
                 request.completion(entered)
             } else {
-                reject("That PIN isn't right. Try again.")
+                let unreadable = request.lockoutTargets.contains(.administrator) ? AdministratorPIN.readFailureMessage : nil
+                attempts.recordFailure(at: .now, administratorUnreadable: unreadable != nil)
+                updateLock()
+                let attemptsLeft = PINLockout.freeAttempts - attempts.failures
+                let message = unreadable
+                    ?? (attemptsLeft > 0 && attemptsLeft <= 2
+                        ? "That PIN isn't right. \(attemptsLeft) tr\(attemptsLeft == 1 ? "y" : "ies") left before a wait."
+                        : "That PIN isn't right. Try again.")
+                reject(message)
             }
         case .create:
             if let first = firstEntry {
@@ -144,12 +212,34 @@ struct PINPadView: View {
         }
     }
 
+    /// Clears an unreadable administrator PIN after the Mac's owner authenticates, then
+    /// continues as if the PIN had been entered.
+    private func resetWithOwner() {
+        isResetting = true
+        Task {
+            let cleared = await AdministratorPIN.resetWithDeviceOwnerAuthentication()
+            isResetting = false
+            guard cleared else {
+                errorMessage = AdministratorPIN.isUnreadable
+                    ? "The PIN wasn't reset. It stays locked until the Keychain can be read."
+                    : "The PIN wasn't reset."
+                return
+            }
+            canResetWithOwner = false
+            finish()
+            request.completion("")
+        }
+    }
+
     private func reject(_ message: String) {
         errorMessage = message
         shakes += 1
+        // Keys are ignored until the dots clear, so a typed-ahead digit can't land in them.
+        isPaused = true
         Task {
             try? await Task.sleep(for: .milliseconds(250))
             digits = ""
+            isPaused = false
         }
     }
 }

@@ -50,32 +50,50 @@ final class MediaLibrary {
 
     private(set) var titles: [Title] = []
     private(set) var folders: [LibraryFolder] = []
-    private(set) var activity: LibraryActivity?
+    private(set) var activity: LibraryActivity? {
+        didSet {
+            // Folder changes that arrived while busy were held back; work through them now.
+            if activity == nil, oldValue != nil, !pendingChanges.isEmpty {
+                Task { [weak self] in await self?.applyFolderChanges() }
+            }
+        }
+    }
     var notice: LibraryNotice?
 
     var isBusy: Bool { activity != nil }
 
-    private static let watchFoldersKey = "library.watchFolders"
-
-    /// Adds new videos from watched folders automatically (and removes deleted ones).
-    var watchesFolders: Bool = UserDefaults.standard.object(forKey: MediaLibrary.watchFoldersKey) as? Bool ?? true {
-        didSet {
-            UserDefaults.standard.set(watchesFolders, forKey: Self.watchFoldersKey)
-            restartWatching()
-        }
-    }
+    /// Library folders are always watched: deleted videos leave the library, and new ones
+    /// wait in `pending` until the administrator approves them.
+    private(set) var pending: [PendingMedia] = []
 
     private var watcher: FolderWatcher?
+    /// Network volumes don't report file changes reliably, so their folders are polled.
+    private var networkPoll: Task<Void, Never>?
+    /// Re-checks folders when a drive or share is mounted.
+    private var mountWatch: Task<Void, Never>?
     private var pendingChanges: [FolderWatcher.Change] = []
+    /// Folder changes are being worked out; later ones wait for the same pass.
+    private var isApplyingChanges = false
 
     /// Playback ID → where its file lives.
     private var files: [String: FileReference] = [:]
-    /// Security scopes opened for playback, closed when playback ends.
-    private var playbackScopes: [String: URL] = [:]
-    /// Folder scopes kept open for the session so files inside stay reachable.
-    private var sessionScopes: [URL] = []
+    /// Security scopes opened for playback, by playback ID: one entry per `beginPlayback`,
+    /// each closed by its own `endPlayback`, so a second user of the same file (or a quick
+    /// look such as Reveal in Finder) never closes another's access.
+    private var playbackScopes: [String: [URL]] = [:]
+    /// Opens the saved folder scopes after launch (resolving bookmarks can be slow on a
+    /// network volume, so it isn't done on the main actor). File access waits for it.
+    private var scopeOpening: Task<Void, Never>?
+    /// Folder (and chosen file) scopes kept open for the session so files inside stay
+    /// reachable, by path: each is opened once and closed when its folder is removed.
+    private var sessionScopes: [String: URL] = [:]
+    /// Intro and credits times by episode ID, updated as background analysis finishes.
+    private(set) var skipSegments: [String: SkipSegments] = [:]
+    /// Episode IDs waiting for intro and credits analysis, and the task working through them.
+    private var skipQueue: [String] = []
+    private var skipWorker: Task<Void, Never>?
 
-    private struct FileReference {
+    nonisolated private struct FileReference: Sendable {
         let path: String
         let bookmark: Data?
         let ownerID: String
@@ -86,9 +104,20 @@ final class MediaLibrary {
         self.container = container
         self.context = container.mainContext
         self.metadata = metadata
-        openFolderScopes()
         reload()
-        restartWatching()
+        scopeOpening = Task { [weak self] in
+            await self?.openFolderScopes()
+            self?.restartWatching()
+        }
+    }
+
+    isolated deinit {
+        networkPoll?.cancel()
+        mountWatch?.cancel()
+        skipWorker?.cancel()
+        scopeOpening?.cancel()
+        for url in sessionScopes.values { url.stopAccessingSecurityScopedResource() }
+        for url in playbackScopes.values.joined() { url.stopAccessingSecurityScopedResource() }
     }
 
     // MARK: Reading
@@ -96,8 +125,11 @@ final class MediaLibrary {
     func reload() {
         let items = (try? context.fetch(FetchDescriptor<MediaItem>(sortBy: [SortDescriptor(\.dateAdded, order: .reverse)]))) ?? []
         folders = (try? context.fetch(FetchDescriptor<LibraryFolder>(sortBy: [SortDescriptor(\.path)]))) ?? []
+        pending = (try? context.fetch(FetchDescriptor<PendingMedia>(predicate: #Predicate { !$0.isIgnored },
+                                                                     sortBy: [SortDescriptor(\.dateFound)]))) ?? []
 
         var references: [String: FileReference] = [:]
+        var segments: [String: SkipSegments] = [:]
         for item in items {
             if let path = item.filePath {
                 references[item.id] = FileReference(path: path, bookmark: item.fileBookmark, ownerID: item.id, isEpisode: false)
@@ -105,9 +137,12 @@ final class MediaLibrary {
             for episode in item.episodes {
                 references[episode.id] = FileReference(path: episode.filePath, bookmark: episode.fileBookmark,
                                                        ownerID: episode.id, isEpisode: true)
+                let found = SkipSegments(introStart: episode.introStart, introEnd: episode.introEnd, creditsStart: episode.creditsStart)
+                if !found.isEmpty { segments[episode.id] = found }
             }
         }
         files = references
+        skipSegments = segments
         titles = items.map { Self.makeTitle(from: $0) }
         prefetchArtwork()
     }
@@ -124,25 +159,20 @@ final class MediaLibrary {
 
     /// Adds video files and folders (scanned recursively). Already-imported files are skipped.
     func importMedia(from urls: [URL]) async {
+        await waitForFolderChanges()
         guard !isBusy else {
             notice = LibraryNotice(message: "Please wait for the current import to finish.")
             return
         }
         activity = LibraryActivity(message: "Scanning for videos…")
 
-        var discovered: [URL] = []
-        for url in urls {
-            // Keep access for this session; bookmarks restore it on later launches.
-            if url.startAccessingSecurityScopedResource() {
-                sessionScopes.append(url)
-            }
-            if Self.isDirectory(url) {
-                rememberFolder(url)
-                discovered += Self.videoFiles(in: url)
-            } else if FilenameParser.isVideoFile(url) {
-                discovered.append(url)
-            }
-        }
+        // Keep access for this session; bookmarks restore it on later launches.
+        for url in urls { openSessionScope(url) }
+        // Folders are read off the main actor, so a large or slow (network) folder doesn't
+        // stall the interface.
+        let scan = await Self.scan(urls)
+        for (folder, bookmark) in scan.folders { rememberFolder(folder, bookmark: bookmark) }
+        let discovered = scan.videos
 
         // Titles already in the wrong library (a movie under TV Shows, or the reverse) move first.
         let reclassified = reclassifyMisplacedTitles()
@@ -156,6 +186,7 @@ final class MediaLibrary {
             notice = LibraryNotice(message: movedNote ?? (discovered.isEmpty
                 ? "No supported video files were found."
                 : "Everything there is already in your library."))
+            analyzeSkipSegments(forShows: reclassified.items)
             if !reclassified.items.isEmpty, metadata.settings.autoFetch {
                 await refreshMetadata(for: reclassified.items.map(\.id), force: false)
             }
@@ -172,11 +203,14 @@ final class MediaLibrary {
 
         for (index, file) in newFiles.enumerated() {
             let parsed = FilenameParser.parse(url: file)
-            let bookmark = Self.bookmark(for: file)
+            let bookmark = await Self.makeBookmark(for: file)
             let inspection = await Self.inspect(file)
 
             if parsed.isEpisode, let season = parsed.season, let number = parsed.episode {
                 let key = FilenameParser.normalizedKey(parsed.title)
+                // A show removed while files were being read (say, its folder was removed) is
+                // made again rather than used.
+                if let existing = series[key], Self.isGone(existing) { series[key] = nil }
                 let show = series[key] ?? {
                     let created = MediaItem(kind: .series, name: parsed.title, year: parsed.year)
                     context.insert(created)
@@ -210,6 +244,8 @@ final class MediaLibrary {
         save()
         reload()
         activity = nil
+        // Find every new episode's intro and credits now, so Skip Intro is ready on first play.
+        analyzeSkipSegments(forShows: touched + reclassified.items)
 
         let movies = touched.filter { $0.kind == .movie }.count
         let shows = touched.count - movies
@@ -297,22 +333,27 @@ final class MediaLibrary {
 
     /// Re-scans every remembered folder for new files.
     func rescanFolders() async {
-        let urls = folders.compactMap { folder -> URL? in
-            guard let bookmark = folder.bookmark else { return URL(fileURLWithPath: folder.path) }
-            var isStale = false
-            return try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], relativeTo: nil,
-                            bookmarkDataIsStale: &isStale)
+        await scopeOpening?.value
+        let saved = folders.map { (path: $0.path, bookmark: $0.bookmark) }
+        var urls: [URL] = []
+        for folder in saved {
+            guard let bookmark = folder.bookmark else {
+                urls.append(URL(fileURLWithPath: folder.path))
+                continue
+            }
+            if let resolved = await Self.resolve(bookmark, startAccess: false) { urls.append(resolved.url) }
         }
         guard !urls.isEmpty else {
             notice = LibraryNotice(message: "Add a folder first, then it can be rescanned for new videos.")
             return
         }
         await importMedia(from: urls)
-        for folder in folders { folder.lastScanned = .now }
+        for folder in folders where !Self.isGone(folder) { folder.lastScanned = .now }
         save()
     }
 
     func removeFolder(_ folder: LibraryFolder) {
+        sessionScopes.removeValue(forKey: folder.path)?.stopAccessingSecurityScopedResource()
         context.delete(folder)
         save()
         reload()
@@ -323,27 +364,132 @@ final class MediaLibrary {
 
     private func restartWatching() {
         watcher = nil
-        guard watchesFolders else { return }
+        networkPoll?.cancel()
         let paths = ((try? context.fetch(FetchDescriptor<LibraryFolder>())) ?? []).map(\.path)
         watcher = FolderWatcher(paths: paths) { [weak self] changes in
-            self?.pendingChanges += changes
-            Task { await self?.applyFolderChanges() }
+            guard let self else { return }
+            pendingChanges += changes
+            Task { [weak self] in await self?.applyFolderChanges() }
         }
+        // NAS shares and other network volumes: check every few minutes instead. Finding which
+        // folders are on one touches the volumes, so it's done off the main actor.
+        networkPoll = Task { [weak self] in
+            let networkPaths = await Self.networkPaths(among: paths)
+            guard !networkPaths.isEmpty else { return }
+            while !Task.isCancelled {
+                do {
+                    // Held only while polling, so a library that's gone ends the loop.
+                    guard let self else { return }
+                    await self.pollNetworkFolders(networkPaths)
+                }
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
+        // A drive or share that reconnects is checked straight away.
+        if mountWatch == nil {
+            mountWatch = Task { [weak self] in
+                let mounts = NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didMountNotification)
+                for await _ in mounts.map({ _ in () }) {
+                    guard let self, !Task.isCancelled else { return }
+                    self.restartWatching()
+                }
+            }
+        }
+    }
+
+    /// Whether a folder lives on a network volume (SMB/AFP/NFS share, NAS).
+    nonisolated static func isOnNetworkVolume(_ path: String) -> Bool {
+        let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeIsLocalKey])
+        return values?.volumeIsLocal == false
+    }
+
+    @concurrent
+    nonisolated private static func networkPaths(among paths: [String]) async -> [String] {
+        paths.filter(isOnNetworkVolume)
+    }
+
+    /// Compares a network folder's videos with the library and reports the differences as
+    /// changes, the same as FSEvents would.
+    private func pollNetworkFolders(_ paths: [String]) async {
+        let known = Set(files.values.map(\.path))
+        let changes = await Self.networkChanges(in: paths, known: known)
+        guard !changes.isEmpty, !Task.isCancelled else { return }
+        pendingChanges += changes
+        await applyFolderChanges()
+    }
+
+    /// Reads the folders (slow on a network share) off the main actor.
+    @concurrent
+    nonisolated private static func networkChanges(in paths: [String], known: Set<String>) async -> [FolderWatcher.Change] {
+        let manager = FileManager.default
+        var changes: [FolderWatcher.Change] = []
+        for path in paths where manager.fileExists(atPath: path) {
+            if Task.isCancelled { return [] }
+            let found = videoFiles(in: URL(fileURLWithPath: path)).map(\.path)
+            changes += found.filter { !known.contains($0) }.map { FolderWatcher.Change(path: $0, wasRemoved: false) }
+            let prefix = path.hasSuffix("/") ? path : path + "/"
+            changes += known.filter { $0.hasPrefix(prefix) && !manager.fileExists(atPath: $0) }
+                .map { FolderWatcher.Change(path: $0, wasRemoved: true) }
+        }
+        return changes
+    }
+
+    // MARK: Approval
+
+    /// Adds approved videos to the library.
+    func approvePending(_ items: [PendingMedia]) async {
+        await waitForFolderChanges()
+        // Approved videos leave the waiting list only when they can be imported now.
+        guard !isBusy else {
+            notice = LibraryNotice(message: "Please wait for the current import to finish.")
+            return
+        }
+        let items = items.filter { !Self.isGone($0) }
+        let urls = items.map { URL(fileURLWithPath: $0.path) }
+        for item in items { context.delete(item) }
+        save()
+        reload()
+        await importMedia(from: urls)
+    }
+
+    /// Declines videos; they won't be offered again.
+    func ignorePending(_ items: [PendingMedia]) {
+        for item in items { item.isIgnored = true }
+        save()
+        reload()
+    }
+
+    /// Queues newly detected videos for the administrator's approval.
+    private func queueForApproval(_ videos: [URL]) {
+        let existing = Set(((try? context.fetch(FetchDescriptor<PendingMedia>())) ?? []).map(\.path))
+        let new = videos.filter { !existing.contains($0.path) }
+        guard !new.isEmpty else { return }
+        for video in new { context.insert(PendingMedia(path: video.path)) }
+        save()
+        reload()
+        notice = LibraryNotice(message: "\(new.count) new video\(new.count == 1 ? " is" : "s are") waiting for approval in Library.")
     }
 
     /// Imports new or changed videos and drops titles whose files were deleted. A missing
     /// folder (an unplugged drive) is left alone so its titles come back when it returns.
     private func applyFolderChanges() async {
-        guard !isBusy, !pendingChanges.isEmpty else { return }
+        guard !isBusy, !isApplyingChanges, !pendingChanges.isEmpty else { return }
+        isApplyingChanges = true
         let changes = pendingChanges
         pendingChanges = []
-        let manager = FileManager.default
 
-        let removed = Set(changes.filter { $0.wasRemoved && !manager.fileExists(atPath: $0.path) }.map(\.path))
+        // What changed is worked out off the main actor (it checks every affected file);
+        // only the database updates happen here.
+        let found = await Self.folderChangeSet(changes, references: Array(files.values), folderPaths: folders.map(\.path))
+        // An import or info fetch that began meanwhile owns the library: hand these changes
+        // back, to be worked out again once it ends (the files may have changed since).
+        guard !isBusy else {
+            pendingChanges = changes + pendingChanges
+            isApplyingChanges = false
+            return
+        }
         var removedAny = false
-        for reference in files.values where removed.contains(reference.path) || removed.contains(where: { reference.path.hasPrefix($0 + "/") }) {
-            let rootStillThere = folders.contains { reference.path.hasPrefix($0.path + "/") && manager.fileExists(atPath: $0.path) }
-            guard rootStillThere, !manager.fileExists(atPath: reference.path) else { continue }
+        for reference in found.removed {
             if reference.isEpisode {
                 let ownerID = reference.ownerID
                 if let episode = try? context.fetch(FetchDescriptor<MediaEpisode>(predicate: #Predicate { $0.id == ownerID })).first {
@@ -361,20 +507,56 @@ final class MediaLibrary {
             reload()
         }
 
+        // Files imported meanwhile aren't offered again.
         let known = Set(files.values.map(\.path))
+        let videos = found.videos.filter { !known.contains($0.path) }
+        if !videos.isEmpty {
+            // Detected, not chosen: the administrator approves them first.
+            queueForApproval(videos)
+        }
+        isApplyingChanges = false
+        if !pendingChanges.isEmpty { await applyFolderChanges() }
+    }
+
+    /// Waits for a folder-change pass in progress to finish, so an import or info fetch
+    /// doesn't start while it's working out what changed.
+    private func waitForFolderChanges() async {
+        while isApplyingChanges, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    /// Whether a model was deleted (or its library reset) since it was fetched.
+    private static func isGone(_ model: some PersistentModel) -> Bool {
+        model.isDeleted || model.modelContext == nil
+    }
+
+    /// The library files a batch of changes removed (whose folder is still there, so it's not
+    /// just an unplugged drive), and the new videos it added.
+    @concurrent
+    nonisolated private static func folderChangeSet(_ changes: [FolderWatcher.Change], references: [FileReference],
+                                                     folderPaths: [String]) async -> (removed: [FileReference], videos: [URL]) {
+        let manager = FileManager.default
+        let removedPaths = Set(changes.filter { $0.wasRemoved && !manager.fileExists(atPath: $0.path) }.map(\.path))
+        let presentFolders = folderPaths.filter { manager.fileExists(atPath: $0) }
+        let removed = references.filter { reference in
+            guard removedPaths.contains(reference.path) || removedPaths.contains(where: { reference.path.hasPrefix($0 + "/") })
+            else { return false }
+            let rootStillThere = presentFolders.contains { reference.path.hasPrefix($0 + "/") }
+            return rootStillThere && !manager.fileExists(atPath: reference.path)
+        }
+
+        let known = Set(references.map(\.path))
         let added = Set(changes.filter { !$0.wasRemoved }.map(\.path)).filter { path in
             !known.contains(path) && manager.fileExists(atPath: path)
-                && (FilenameParser.isVideoFile(URL(fileURLWithPath: path)) || Self.isDirectory(URL(fileURLWithPath: path)))
+                && (FilenameParser.isVideoFile(URL(fileURLWithPath: path)) || isDirectory(URL(fileURLWithPath: path)))
         }
         // New subfolders contribute their videos; they aren't separate watched folders.
         let videos = added.sorted().flatMap { path -> [URL] in
             let url = URL(fileURLWithPath: path)
-            return Self.isDirectory(url) ? Self.videoFiles(in: url).filter { !known.contains($0.path) } : [url]
+            return isDirectory(url) ? videoFiles(in: url).filter { !known.contains($0.path) } : [url]
         }
-        if !videos.isEmpty {
-            await importMedia(from: videos)
-        }
-        if !pendingChanges.isEmpty { await applyFolderChanges() }
+        return (removed, videos)
     }
 
     // MARK: Metadata
@@ -409,11 +591,14 @@ final class MediaLibrary {
             notice = LibraryNotice(message: "Turn on a metadata source in Settings to fetch movie info.", isError: true)
             return
         }
+        await waitForFolderChanges()
         guard !isBusy else { return }
 
         activity = LibraryActivity(message: "Fetching info…", total: items.count)
         var unmatched = 0
         for (index, item) in items.enumerated() {
+            // Titles removed while info was being fetched are skipped.
+            guard !Self.isGone(item) else { continue }
             activity?.message = "Fetching info for \(item.name)…"
             let query = Self.query(for: item)
             var merged: MergedMetadata?
@@ -423,6 +608,8 @@ final class MediaLibrary {
             if merged == nil {
                 merged = await metadata.identify(query)
             }
+            // The title may have been removed during the lookup.
+            guard !Self.isGone(item) else { continue }
             if let merged {
                 apply(merged, to: item)
             } else {
@@ -431,9 +618,14 @@ final class MediaLibrary {
             }
             item.lastRefreshed = .now
             activity?.completed = index + 1
-            save()
-            reload()
+            // Shown straight away; saved in batches, and the library is rebuilt once at the end.
+            if let position = titles.firstIndex(where: { $0.id == item.id }) {
+                titles[position] = Self.makeTitle(from: item)
+            }
+            if (index + 1) % 25 == 0 { save() }
         }
+        save()
+        reload()
         activity = nil
         if unmatched > 0 {
             notice = LibraryNotice(message: "\(unmatched) title\(unmatched == 1 ? "" : "s") couldn't be identified. Use Fix Match to choose the right one.")
@@ -443,7 +635,8 @@ final class MediaLibrary {
     /// Applies a search result the user picked in Fix Match.
     func applyMatch(_ candidate: MetadataCandidate, to titleID: String) async throws {
         guard let item = item(for: titleID) else { return }
-        guard let merged = try await metadata.metadata(for: candidate, query: Self.query(for: item)) else { return }
+        guard let merged = try await metadata.metadata(for: candidate, query: Self.query(for: item)),
+              !Self.isGone(item) else { return }
         item.isMetadataLocked = false // An explicit match replaces previous edits.
         apply(merged, to: item)
         item.lastRefreshed = .now
@@ -469,60 +662,156 @@ final class MediaLibrary {
 
     func remove(_ titleID: String) {
         guard let item = item(for: titleID) else { return }
+        ExternalSubtitleLibrary.remove(playbackIDs: [item.id] + item.episodes.map(\.id))
         context.delete(item)
         save()
         reload()
     }
 
+    /// A file that's gone while the drive it lived on is still connected (so it was moved or
+    /// deleted, rather than sitting on an unplugged drive).
+    func isFileMissing(_ playbackID: String) -> Bool {
+        guard let path = files[playbackID]?.path, !FileManager.default.fileExists(atPath: path) else { return false }
+        let components = URL(fileURLWithPath: path).pathComponents
+        if components.count > 2, components[1] == "Volumes" {
+            return FileManager.default.fileExists(atPath: "/Volumes/" + components[2])
+        }
+        return true
+    }
+
+    /// Removes one movie or episode by its playback ID; a show goes once it has no episodes left.
+    func removePlayable(_ playbackID: String) {
+        if let reference = files[playbackID], reference.isEpisode {
+            let ownerID = reference.ownerID
+            if let episode = try? context.fetch(FetchDescriptor<MediaEpisode>(predicate: #Predicate { $0.id == ownerID })).first {
+                ExternalSubtitleLibrary.remove(playbackIDs: [playbackID])
+                let show = episode.show
+                context.delete(episode)
+                if let show, show.episodes.allSatisfy({ $0.id == ownerID }) { context.delete(show) }
+                save()
+                reload()
+            }
+        } else {
+            remove(playbackID)
+        }
+    }
+
     // MARK: Playback & Finder
 
-    /// Resolves a file for playback and opens its security scope. Pair with `endPlayback`.
-    func beginPlayback(_ playbackID: String) -> URL? {
+    /// Resolves a file for playback and opens its security scope. Pair each call with one
+    /// `endPlayback`. The bookmark is resolved off the main actor (a sleeping network drive
+    /// can take a while to answer).
+    func beginPlayback(_ playbackID: String) async -> URL? {
+        guard let opened = await openFile(playbackID) else { return nil }
+        if opened.scoped { playbackScopes[playbackID, default: []].append(opened.url) }
+        return opened.url
+    }
+
+    /// Opens a file briefly (e.g. to read its tracks) without touching playback's own access.
+    func withFileAccess<T>(_ playbackID: String, _ body: (URL) async -> T) async -> T? {
+        guard let opened = await openFile(playbackID) else { return nil }
+        defer { if opened.scoped { opened.url.stopAccessingSecurityScopedResource() } }
+        return await body(opened.url)
+    }
+
+    /// Closes the access opened by one `beginPlayback`. Other users of the file keep theirs.
+    func endPlayback(_ playbackID: String) {
+        guard var scopes = playbackScopes[playbackID], !scopes.isEmpty else { return }
+        scopes.removeLast().stopAccessingSecurityScopedResource()
+        playbackScopes[playbackID] = scopes.isEmpty ? nil : scopes
+    }
+
+    /// Resolves a file and opens a scope of its own (`scoped`: the caller must close it).
+    /// `nil` when the file can't be read.
+    private func openFile(_ playbackID: String) async -> (url: URL, scoped: Bool)? {
+        await scopeOpening?.value
+        guard let reference = files[playbackID] else { return nil }
+        if let bookmark = reference.bookmark, let resolved = await Self.resolve(bookmark, startAccess: true) {
+            if let fresh = resolved.freshBookmark { refreshBookmark(for: reference, with: fresh) }
+            if resolved.isReadable { return (resolved.url, resolved.didStartAccess) }
+            if resolved.didStartAccess { resolved.url.stopAccessingSecurityScopedResource() }
+            return nil
+        }
+        // No bookmark (or it no longer resolves): reachable only through an open folder scope.
+        let url = URL(fileURLWithPath: reference.path)
+        return await Self.isReadable(url) ? (url, false) : nil
+    }
+
+    /// A resolved security-scoped bookmark.
+    nonisolated private struct ResolvedBookmark: @unchecked Sendable { // URL and Data are values.
+        let url: URL
+        /// Whether a scope was opened for the caller to close.
+        let didStartAccess: Bool
+        /// A replacement for a stale bookmark, when one could be made.
+        let freshBookmark: Data?
+        let isReadable: Bool
+    }
+
+    /// Resolves a bookmark off the main actor, optionally opening its scope.
+    @concurrent
+    nonisolated private static func resolve(_ bookmark: Data, startAccess: Bool) async -> ResolvedBookmark? {
+        var isStale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], relativeTo: nil,
+                                 bookmarkDataIsStale: &isStale) else { return nil }
+        let started = url.startAccessingSecurityScopedResource()
+        let fresh = isStale ? Self.bookmark(for: url) : nil
+        let readable = FileManager.default.isReadableFile(atPath: url.path)
+        if started, !startAccess { url.stopAccessingSecurityScopedResource() }
+        return ResolvedBookmark(url: url, didStartAccess: started && startAccess, freshBookmark: fresh, isReadable: readable)
+    }
+
+    @concurrent
+    nonisolated private static func isReadable(_ url: URL) async -> Bool {
+        FileManager.default.isReadableFile(atPath: url.path)
+    }
+
+    /// Moves a title's video files (every episode, for a show) to the Trash and removes the
+    /// title. Returns how many files couldn't be moved.
+    @discardableResult
+    func moveToTrash(_ titleID: String) -> Int {
+        guard let item = item(for: titleID) else { return 0 }
+        let ids = item.kind == .movie ? [item.id] : item.episodes.map(\.id)
+        var failures = 0
+        for id in ids {
+            // A scope of its own: an open player's access to the same file is left alone.
+            guard let opened = openFileNow(id) else { failures += 1; continue }
+            do { try FileManager.default.trashItem(at: opened.url, resultingItemURL: nil) } catch { failures += 1 }
+            if opened.scoped { opened.url.stopAccessingSecurityScopedResource() }
+        }
+        remove(titleID)
+        if failures > 0 {
+            notice = LibraryNotice(message: "\(failures) file\(failures == 1 ? "" : "s") couldn't be moved to the Trash. The title was removed from your library.", isError: true)
+        }
+        return failures
+    }
+
+    func revealInFinder(_ playbackID: String) {
+        Task {
+            // Its own scope, so a player showing the same file keeps its access.
+            guard let opened = await openFile(playbackID) else {
+                notice = LibraryNotice(message: "The file couldn't be found. It may have been moved or its drive disconnected.", isError: true)
+                return
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([opened.url])
+            if opened.scoped { opened.url.stopAccessingSecurityScopedResource() }
+        }
+    }
+
+    /// `openFile` for the Trash, which runs straight after the administrator confirms.
+    private func openFileNow(_ playbackID: String) -> (url: URL, scoped: Bool)? {
         guard let reference = files[playbackID] else { return nil }
         if let bookmark = reference.bookmark {
             var isStale = false
             if let url = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], relativeTo: nil,
                                   bookmarkDataIsStale: &isStale) {
-                if url.startAccessingSecurityScopedResource() {
-                    playbackScopes[playbackID] = url
-                }
-                if isStale { refreshBookmark(for: reference, url: url) }
-                return url
+                let scoped = url.startAccessingSecurityScopedResource()
+                if FileManager.default.isReadableFile(atPath: url.path) { return (url, scoped) }
+                if scoped { url.stopAccessingSecurityScopedResource() }
+                return nil
             }
         }
-        // No bookmark: reachable only through an open folder scope.
-        return FileManager.default.isReadableFile(atPath: reference.path) ? URL(fileURLWithPath: reference.path) : nil
-    }
-
-    /// Opens a file briefly (e.g. to read its tracks) without touching playback's own access.
-    func withFileAccess<T>(_ playbackID: String, _ body: (URL) async -> T) async -> T? {
-        guard let reference = files[playbackID] else { return nil }
-        var url = URL(fileURLWithPath: reference.path)
-        var scoped = false
-        if let bookmark = reference.bookmark {
-            var isStale = false
-            if let resolved = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], relativeTo: nil,
-                                       bookmarkDataIsStale: &isStale) {
-                url = resolved
-                scoped = url.startAccessingSecurityScopedResource()
-            }
-        }
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard FileManager.default.isReadableFile(atPath: url.path) else { return nil }
-        return await body(url)
-    }
-
-    func endPlayback(_ playbackID: String) {
-        playbackScopes.removeValue(forKey: playbackID)?.stopAccessingSecurityScopedResource()
-    }
-
-    func revealInFinder(_ playbackID: String) {
-        guard let url = beginPlayback(playbackID) else {
-            notice = LibraryNotice(message: "The file couldn't be found. It may have been moved or its drive disconnected.", isError: true)
-            return
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-        endPlayback(playbackID)
+        let url = URL(fileURLWithPath: reference.path)
+        return FileManager.default.isReadableFile(atPath: url.path) ? (url, false) : nil
     }
 
     // MARK: Private
@@ -543,8 +832,9 @@ final class MediaLibrary {
             if !record.writers.isEmpty { item.writers = record.writers }
             if !record.studios.isEmpty { item.studios = record.studios }
             item.collection = record.collection ?? item.collection
-            item.posterURLString = record.posterURL?.absoluteString ?? item.posterURLString
-            item.backdropURLString = record.backdropURL?.absoluteString ?? item.backdropURLString
+            // Web addresses only: a local file as artwork comes only from the user's own edits.
+            item.posterURLString = ArtworkCache.webArtworkURL(record.posterURL)?.absoluteString ?? item.posterURLString
+            item.backdropURLString = ArtworkCache.webArtworkURL(record.backdropURL)?.absoluteString ?? item.backdropURLString
         }
         item.ratings = record.ratings
         item.trailer = record.trailer ?? item.trailer
@@ -564,7 +854,7 @@ final class MediaLibrary {
                 episode.synopsis = match.synopsis ?? episode.synopsis
             }
             episode.runtimeMinutes = match.runtimeMinutes ?? episode.runtimeMinutes
-            episode.stillURLString = match.stillURL?.absoluteString ?? episode.stillURLString
+            episode.stillURLString = ArtworkCache.webArtworkURL(match.stillURL)?.absoluteString ?? episode.stillURLString
         }
     }
 
@@ -581,31 +871,49 @@ final class MediaLibrary {
         }
     }
 
-    private func rememberFolder(_ url: URL) {
+    private func rememberFolder(_ url: URL, bookmark: Data?) {
         guard !folders.contains(where: { $0.path == url.path }) else { return }
-        context.insert(LibraryFolder(path: url.path, bookmark: Self.bookmark(for: url)))
+        context.insert(LibraryFolder(path: url.path, bookmark: bookmark))
         save()
         restartWatching()
     }
 
     /// Re-opens saved folder scopes at launch so files without their own bookmark stay playable.
-    private func openFolderScopes() {
-        let saved = (try? context.fetch(FetchDescriptor<LibraryFolder>())) ?? []
-        for folder in saved {
-            guard let bookmark = folder.bookmark else { continue }
-            var isStale = false
-            guard let url = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], relativeTo: nil,
-                                     bookmarkDataIsStale: &isStale) else { continue }
-            if url.startAccessingSecurityScopedResource() {
-                sessionScopes.append(url)
-            }
-            if isStale { folder.bookmark = Self.bookmark(for: url) }
+    /// The bookmarks are resolved off the main actor.
+    private func openFolderScopes() async {
+        let saved = ((try? context.fetch(FetchDescriptor<LibraryFolder>())) ?? []).compactMap { folder in
+            folder.bookmark.map { (path: folder.path, bookmark: $0) }
         }
+        var refreshed = false
+        for folder in saved {
+            if Task.isCancelled { return }
+            guard let resolved = await Self.resolve(folder.bookmark, startAccess: true) else { continue }
+            if resolved.didStartAccess {
+                if sessionScopes[resolved.url.path] == nil {
+                    sessionScopes[resolved.url.path] = resolved.url
+                } else {
+                    resolved.url.stopAccessingSecurityScopedResource() // Opened meanwhile by an import.
+                }
+            }
+            // Fetched again: the folder may have been removed while its bookmark resolved.
+            let path = folder.path
+            if let fresh = resolved.freshBookmark,
+               let current = try? context.fetch(FetchDescriptor<LibraryFolder>(predicate: #Predicate { $0.path == path })).first {
+                current.bookmark = fresh
+                refreshed = true
+            }
+        }
+        if refreshed { save() }
     }
 
-    private func refreshBookmark(for reference: FileReference, url: URL) {
+    /// Opens a folder's or file's security scope for the rest of the session, once per path.
+    private func openSessionScope(_ url: URL) {
+        guard sessionScopes[url.path] == nil, url.startAccessingSecurityScopedResource() else { return }
+        sessionScopes[url.path] = url
+    }
+
+    private func refreshBookmark(for reference: FileReference, with fresh: Data) {
         let ownerID = reference.ownerID
-        let fresh = Self.bookmark(for: url)
         if reference.isEpisode {
             let episode = try? context.fetch(FetchDescriptor<MediaEpisode>(predicate: #Predicate { $0.id == ownerID })).first
             episode?.fileBookmark = fresh
@@ -667,16 +975,38 @@ final class MediaLibrary {
         reload()
     }
 
-    private static func bookmark(for url: URL) -> Data? {
+    nonisolated private static func bookmark(for url: URL) -> Data? {
         try? url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
                               includingResourceValuesForKeys: nil, relativeTo: nil)
     }
 
-    private static func isDirectory(_ url: URL) -> Bool {
+    @concurrent
+    nonisolated private static func makeBookmark(for url: URL) async -> Data? {
+        bookmark(for: url)
+    }
+
+    /// Sorts chosen items into folders (with their bookmarks) and the videos found in them,
+    /// scanning folders recursively, off the main actor.
+    @concurrent
+    nonisolated private static func scan(_ urls: [URL]) async -> (folders: [(URL, Data?)], videos: [URL]) {
+        var folders: [(URL, Data?)] = []
+        var videos: [URL] = []
+        for url in urls {
+            if isDirectory(url) {
+                folders.append((url, bookmark(for: url)))
+                videos += videoFiles(in: url)
+            } else if FilenameParser.isVideoFile(url) {
+                videos.append(url)
+            }
+        }
+        return (folders, videos)
+    }
+
+    nonisolated private static func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
     }
 
-    private static func videoFiles(in folder: URL) -> [URL] {
+    nonisolated private static func videoFiles(in folder: URL) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: folder, includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
@@ -735,8 +1065,9 @@ final class MediaLibrary {
         let items = (try? context.fetch(FetchDescriptor<MediaItem>())) ?? []
         var unreachable = false
         for item in items {
+            if Self.isGone(item) { continue }
             if item.filePath != nil {
-                if let result = await withFileAccess(item.id, { await Self.inspect($0) }) {
+                if let result = await withFileAccess(item.id, { await Self.inspect($0) }), !Self.isGone(item) {
                     item.isPlayable = result.isPlayable
                     item.qualityBadges = result.badges.map(\.rawValue)
                     item.playbackIssue = result.issue?.message
@@ -745,8 +1076,8 @@ final class MediaLibrary {
                     unreachable = true
                 }
             }
-            for episode in item.episodes {
-                if let result = await withFileAccess(episode.id, { await Self.inspect($0) }) {
+            for episode in Self.isGone(item) ? [] : item.episodes {
+                if let result = await withFileAccess(episode.id, { await Self.inspect($0) }), !Self.isGone(episode) {
                     episode.isPlayable = result.isPlayable
                     episode.qualityBadges = result.badges.map(\.rawValue)
                     episode.playbackIssue = result.issue?.message
@@ -760,6 +1091,106 @@ final class MediaLibrary {
         reload()
         // Try again next launch if some files were offline.
         if !unreachable { UserDefaults.standard.set(Self.probeVersion, forKey: Self.probeVersionKey) }
+    }
+
+    // MARK: Skip Intro & Credits
+
+    /// Finds the intro and credits of an episode that's starting to play, and of the episode
+    /// after it, in the background. Results are saved and published in `skipSegments`.
+    func analyzeSkipSegments(startingWith episodeID: String) {
+        guard let episode = mediaEpisode(episodeID), let show = episode.show else { return }
+        let season = show.sortedEpisodes.filter { $0.season == episode.season }
+        guard let index = season.firstIndex(where: { $0.id == episodeID }) else { return }
+        let wanted = season[index...].prefix(2)
+            .filter { $0.isPlayable && $0.skipAnalysisVersion < SkipSegmentDetector.version }
+            .map(\.id)
+        skipQueue.removeAll { wanted.contains($0) }
+        skipQueue.insert(contentsOf: wanted, at: 0)
+        startSkipWorker()
+    }
+
+    private func startSkipWorker() {
+        guard skipWorker == nil, !skipQueue.isEmpty else { return }
+        skipWorker = Task(priority: .background) { [weak self] in
+            // Let playback (or a fresh import) get going before reading files alongside it.
+            try? await Task.sleep(for: .seconds(5))
+            while let self, !Task.isCancelled, !self.skipQueue.isEmpty {
+                await self.analyzeSkipSegments(of: self.skipQueue.removeFirst())
+            }
+            // A reset cancels this worker and may already have started another.
+            if !Task.isCancelled { self?.skipWorker = nil }
+        }
+    }
+
+    /// Queues every not-yet-analysed episode of newly added shows, season by season in episode
+    /// order (so each neighbour's fingerprint is still cached when the next episode needs it).
+    /// Runs behind anything that's playing, which goes to the front of the queue.
+    func analyzeSkipSegments(forShows shows: [MediaItem]) {
+        let wanted = shows.filter { $0.kind == .series }
+            .flatMap(\.sortedEpisodes)
+            .filter { $0.isPlayable && $0.skipAnalysisVersion < SkipSegmentDetector.version }
+            .map(\.id)
+            .filter { !skipQueue.contains($0) }
+        guard !wanted.isEmpty else { return }
+        skipQueue.append(contentsOf: wanted)
+        startSkipWorker()
+    }
+
+    /// Stops analysis and forgets cached fingerprints (for a library reset).
+    func cancelSkipAnalysis() {
+        skipWorker?.cancel()
+        skipWorker = nil
+        skipQueue = []
+        Task { await EpisodeAudioPrintCache.shared.removeAll() }
+    }
+
+    /// Chapter names first; otherwise the episode's audio is matched against the episodes
+    /// before and after it. Files that can't be reached are left for another time.
+    private func analyzeSkipSegments(of episodeID: String) async {
+        guard let episode = mediaEpisode(episodeID), episode.skipAnalysisVersion < SkipSegmentDetector.version,
+              let show = episode.show else { return }
+        guard var result = await withFileAccess(episodeID, { url in
+            await Task.detached(priority: .background) { SkipSegmentDetector.chapterSegments(in: url) }.value
+        }) else { return }
+
+        if !result.isComplete {
+            // Neighbours in the same season; across seasons only when it has no others.
+            let playable = show.sortedEpisodes.filter { $0.isPlayable || $0.id == episodeID }
+            var siblings = playable.filter { $0.season == episode.season }
+            if siblings.count < 2 { siblings = playable.filter { $0.season != 0 || $0.id == episodeID } }
+            guard let index = siblings.firstIndex(where: { $0.id == episodeID }) else { return }
+            let neighbourIDs = [index - 1, index + 1].filter { siblings.indices.contains($0) }.map { siblings[$0].id }
+
+            guard let target = await audioPrint(episodeID) else { return }
+            var neighbours: [EpisodeAudioPrint] = []
+            for id in neighbourIDs {
+                if Task.isCancelled { return }
+                if let print = await audioPrint(id) { neighbours.append(print) }
+            }
+            // Try again later if the neighbours are offline (an only episode has none to compare).
+            guard !neighbours.isEmpty || neighbourIDs.isEmpty else { return }
+            let detected = await Task.detached(priority: .background) {
+                SkipSegmentDetector.detect(target: target, neighbours: neighbours)
+            }.value
+            result = result.filling(from: detected)
+        }
+
+        // The episode may have been removed (or the library reset) meanwhile.
+        guard !Task.isCancelled, let episode = mediaEpisode(episodeID) else { return }
+        episode.introStart = result.introStart
+        episode.introEnd = result.introEnd
+        episode.creditsStart = result.creditsStart
+        episode.skipAnalysisVersion = SkipSegmentDetector.version
+        save()
+        skipSegments[episodeID] = result.isEmpty ? nil : result
+    }
+
+    private func audioPrint(_ episodeID: String) async -> EpisodeAudioPrint? {
+        await withFileAccess(episodeID) { url in await EpisodeAudioPrintCache.shared.print(for: url) } ?? nil
+    }
+
+    private func mediaEpisode(_ id: String) -> MediaEpisode? {
+        try? context.fetch(FetchDescriptor<MediaEpisode>(predicate: #Predicate { $0.id == id })).first
     }
 
     // MARK: Title building

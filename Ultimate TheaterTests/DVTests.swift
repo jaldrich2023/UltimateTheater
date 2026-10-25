@@ -10,6 +10,7 @@ import Testing
 import Foundation
 import CoreMedia
 import VideoToolbox
+import os
 @testable import Ultimate_Theater
 
 struct DVTests {
@@ -21,7 +22,8 @@ struct DVTests {
                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &session)
         guard status == noErr, let session else { throw MediaFormatError.coreMedia(status) }
         defer { VTCompressionSessionInvalidate(session) }
-        var frames: [Data] = []
+        // The output handler runs on the encoder's threads.
+        let frames = OSAllocatedUnfairLock(initialState: [Data]())
         for index in 0..<count {
             var buffer: CVPixelBuffer?
             CVPixelBufferCreate(nil, 720, 480, kCVPixelFormatType_422YpCbCr8, nil, &buffer)
@@ -34,11 +36,12 @@ struct DVTests {
                 guard let sample, let block = CMSampleBufferGetDataBuffer(sample) else { return }
                 var data = Data(count: CMBlockBufferGetDataLength(block))
                 data.withUnsafeMutableBytes { _ = CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: $0.count, destination: $0.baseAddress!) }
-                frames.append(data)
+                let frame = data
+                frames.withLock { $0.append(frame) }
             }
         }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        return frames
+        return frames.withLock { $0 }
     }
 
     /// Writes 16-bit stereo samples and an AAUX source pack (48 kHz, 1,600 samples) into a frame.

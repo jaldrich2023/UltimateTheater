@@ -66,6 +66,8 @@ struct Profile: Identifiable, Hashable {
     var imageData: Data?
     /// When the profile was last opened; nil if it never has been.
     var lastUsed: Date?
+    /// The household administrator: adds, approves, and manages the library's media.
+    var isAdministrator = false
 
     /// Most profiles the picker offers.
 
@@ -128,6 +130,7 @@ struct Profile: Identifiable, Hashable {
         imageData = stored.imageData
         image = stored.imageData.flatMap(NSImage.init(data:))
         lastUsed = stored.lastUsed
+        isAdministrator = stored.isAdministrator
     }
 
     /// Profiles that earlier versions created automatically. When one of them already has
@@ -156,6 +159,8 @@ final class StoredProfile {
     var dateCreated: Date
     /// When the profile was last opened.
     var lastUsed: Date?
+    /// The household administrator's profile: the only one that adds and manages media.
+    var isAdministrator = false
 
     init(id: String = "profile-\(UUID().uuidString)", name: String, symbol: String, paletteIndex: Int,
          ratingLimit: RatingLimit, allowsUnrated: Bool) {

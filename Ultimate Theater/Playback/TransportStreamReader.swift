@@ -12,6 +12,7 @@ nonisolated final class TransportStreamReader: PESReader {
     let size: UInt64
     private(set) var streams: [Int: ElementaryStreamInfo] = [:]
     var wantedStreams: Set<Int>?
+    var readLimit: UInt64?
 
     private let source: FileByteSource
     private let packetSize: Int
@@ -25,6 +26,7 @@ nonisolated final class TransportStreamReader: PESReader {
     private var partial: [Int: (offset: UInt64, data: Data)] = [:]
     private var ready: [PESPacket] = []
     private var flushedAtEnd = false
+    private static let maxPESBytes = 16 << 20
 
     /// True when the file starts with transport stream packets.
     static func matches(_ head: Data) -> Bool {
@@ -84,7 +86,7 @@ nonisolated final class TransportStreamReader: PESReader {
 
     /// Reads one packet; returns false at end of file.
     private func readPacket() throws -> Bool {
-        guard position + UInt64(packetSize) <= size else { return false }
+        guard position + UInt64(packetSize) <= min(size, readLimit ?? size) else { return false }
         let packetOffset = position
         var b = [UInt8](try source.read(at: position, count: packetSize))
         guard b.count == packetSize else { return false }
@@ -92,7 +94,8 @@ nonisolated final class TransportStreamReader: PESReader {
             // Lost sync: find the next run of sync bytes.
             let window = [UInt8](try source.read(at: position, count: packetSize * 8))
             var found: Int?
-            for i in 1..<max(1, window.count - packetSize * 3) where window[i] == 0x47
+            // Start past the sync offset so the packet start (found - syncOffset) is ahead.
+            for i in (syncOffset + 1)..<max(syncOffset + 1, window.count - packetSize * 3) where window[i] == 0x47
                 && window[i + packetSize] == 0x47 && window[i + packetSize * 2] == 0x47 {
                 found = i
                 break
@@ -122,6 +125,8 @@ nonisolated final class TransportStreamReader: PESReader {
                 partial[pid] = (packetOffset, Data(payload))
             } else if partial[pid] != nil {
                 partial[pid]?.data.append(contentsOf: payload)
+                // A PES never grows this large; deliver what's there rather than grow forever.
+                if let count = partial[pid]?.data.count, count > Self.maxPESBytes { finish(pid) }
             }
             // A PES with a declared length can be delivered as soon as it's complete.
             if let pes = partial[pid], pes.data.count >= 6 {
@@ -174,7 +179,7 @@ nonisolated final class TransportStreamReader: PESReader {
     }
 
     private func readProgramMap(_ s: [UInt8]) {
-        guard s.count >= 16, s[0] == 0x02, streams.isEmpty else { return }
+        guard s.count >= 16, s[0] == 0x02 else { return }
         let infoLength = Int(s[10] & 0x0F) << 8 | Int(s[11])
         var i = 12 + infoLength
         var found: [Int: ElementaryStreamInfo] = [:]
@@ -188,7 +193,9 @@ nonisolated final class TransportStreamReader: PESReader {
             }
             i += 5 + length
         }
-        streams = found
+        // Later maps (program changes) add their streams; known ones keep their description,
+        // since tracks were built from it.
+        streams.merge(found) { known, _ in known }
     }
 
     /// Maps a PMT stream type (and its descriptors) to a codec. Returns nil for streams
@@ -249,10 +256,9 @@ nonisolated final class TransportStreamReader: PESReader {
         case 0x82, 0x85, 0x86: return audio(.dts, "DTS") // DTS, DTS-HD High Resolution, DTS-HD Master Audio (core)
         case 0xA2: return audio(.unsupported("DTS Express"), "DTS Express")
         case 0x83:
-            // Blu-ray TrueHD carries a Dolby Digital stream alongside, for compatibility.
-            var info = audio(.ac3, "TrueHD")
-            info.extractsCore = true
-            info.name = "Dolby TrueHD (Dolby Digital core)"
+            // Blu-ray TrueHD (its Dolby Digital frames, carried in the same stream, are skipped).
+            var info = audio(.trueHD, "TrueHD")
+            info.name = "Dolby TrueHD"
             return info
         case 0x80 where isBluRay:
             var info = audio(.pcm(bits: 16, isFloat: false, isBigEndian: true), "LPCM")

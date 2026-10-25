@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Known issues and limitations
+    url: https://github.com/jaldrich2023/UltimateTheater/blob/main/docs/KNOWN_ISSUES.md
+    about: Check whether your problem is already known before opening an issue.
+  - name: User Manual
+    url: https://github.com/jaldrich2023/UltimateTheater/blob/main/docs/USER_MANUAL.md
+    about: How to use every feature, plus troubleshooting and FAQ.
+  - name: Report a security vulnerability
+    url: https://github.com/jaldrich2023/UltimateTheater/security/advisories/new
+    about: Report security problems privately. Please don't open a public issue.

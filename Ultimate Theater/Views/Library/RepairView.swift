@@ -41,11 +41,19 @@ final class RepairSession {
         self.playbackID = playbackID
     }
 
+    /// Runs blocking file work off the main actor. Cancelling the caller (closing the sheet)
+    /// cancels the work too, which stops at its next cancellation check.
+    private static func offMain<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async -> Result<T, Error> {
+        let task = Task.detached { Result { try work() } }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
     /// Diagnoses the file, then prepares the right repair.
     func start(library: MediaLibrary) async {
         let diagnosis: Result<RepairPlan?, Error>? = await library.withFileAccess(playbackID) { url in
-            await Task.detached { Result { try MediaRepair.diagnose(url) } }.value
+            await Self.offMain { try MediaRepair.diagnose(url) }
         }
+        guard !Task.isCancelled else { return }
         switch diagnosis {
         case .success(let plan?):
             if case .mp4MissingIndex = plan.kind {
@@ -66,21 +74,23 @@ final class RepairSession {
         let candidates = library.repairCandidates(excluding: playbackID)
         let outcome: Result<Void, Error>? = await library.withFileAccess(playbackID) { damagedURL in
             do {
-                let repairer = try await Task.detached { try MovieRepairer(damaged: damagedURL) }.value
+                let repairer = try await Self.offMain { try MovieRepairer(damaged: damagedURL) }.get()
                 var found: RepairReference?
                 for id in candidates where found == nil {
+                    try Task.checkCancellation()
                     found = await library.withFileAccess(id) { url in
                         await MainActor.run { self.phase = .finding("Checking \(url.deletingPathExtension().lastPathComponent)…") }
-                        return await Task.detached { repairer.matchingReference(from: [url]) }.value
+                        return try? await Self.offMain { repairer.matchingReference(from: [url]) }.get()
                     } ?? nil
                 }
+                try Task.checkCancellation()
                 guard let reference = found else { throw MovieRepairError.noMatchingReference }
                 phase = .analyzing(0)
-                let analysis = try await Task.detached {
+                let analysis = try await Self.offMain {
                     try repairer.analyze(with: reference) { fraction in
                         Task { @MainActor in if case .analyzing = self.phase { self.phase = .analyzing(fraction) } }
                     }
-                }.value
+                }.get()
                 self.repairer = repairer
                 self.reference = reference
                 self.analysis = analysis
@@ -89,6 +99,7 @@ final class RepairSession {
                 return .failure(error)
             }
         }
+        guard !Task.isCancelled else { return }
         switch outcome {
         case .success: phase = .review
         case .failure(let error): phase = .failed(error.localizedDescription)
@@ -106,46 +117,79 @@ final class RepairSession {
                 reference.url.deletingPathExtension().lastPathComponent, "\(reference.width)×\(reference.height)")
     }
 
-    func save(to output: URL, library: MediaLibrary) async {
+    /// What a finished repair produced.
+    nonisolated private enum Written: Sendable {
+        case notes([String])
+        case report(MovieRepairReport)
+    }
+
+    /// Which repair runs when saving.
+    nonisolated private enum Job: @unchecked Sendable { // Used by one task at a time.
+        case direct(RepairPlan)
+        case rebuild(MovieRepairer, RepairReference, MovieRepairer.Analysis)
+    }
+
+    /// Writes the repaired copy to a temporary file, then puts it at `destination`. The
+    /// damaged original is never written to: a destination that is the original (or the
+    /// reference movie) is refused, and a file already at the destination is only replaced
+    /// once the repaired copy is complete. A cancelled or failed save deletes only the
+    /// temporary file.
+    func save(to destination: URL, library: MediaLibrary) async {
+        let job: Job
         if let plan {
-            phase = .writing(0)
-            let result: Result<[String], Error>? = await library.withFileAccess(playbackID) { source in
-                await Task.detached {
-                    Result {
-                        try MediaRepair.repair(plan, source: source, to: output) { fraction in
-                            Task { @MainActor in if case .writing = self.phase { self.phase = .writing(fraction) } }
-                        }
-                    }
-                }.value
-            }
-            switch result {
-            case .success(let notes):
-                self.notes = notes
-                let duration = (try? Demuxers.open(output).duration) ?? nil
-                phase = .finished(MovieRepairReport(referenceName: "", videoFrames: 0, keyframes: 0, audioFrames: [],
-                                                    duration: duration ?? 0, frameRate: 0, unrecoveredBytes: 0), output)
-            case .failure(let error): phase = .failed(error.localizedDescription)
-            case nil: phase = .failed("The original file couldn't be read while saving.")
-            }
+            job = .direct(plan)
+        } else if let repairer, let reference, let analysis {
+            job = .rebuild(repairer, reference, analysis)
+        } else {
             return
         }
-        guard let repairer, let reference, let analysis else { return }
+        let protectedReference = reference?.url
         phase = .writing(0)
-        let result: Result<MovieRepairReport, Error>? = await library.withFileAccess(playbackID) { _ in
-            await Task.detached {
-                Result {
-                    try repairer.write(analysis, reference: reference, to: output) { fraction in
-                        Task { @MainActor in if case .writing = self.phase { self.phase = .writing(fraction) } }
-                    }
+        let progress: @Sendable (Double) -> Void = { fraction in
+            Task { @MainActor in if case .writing = self.phase { self.phase = .writing(fraction) } }
+        }
+        let result: Result<(Written, URL), Error>? = await library.withFileAccess(playbackID) { source in
+            let output: RepairOutput
+            do {
+                output = try RepairOutput.prepare(destination: destination,
+                                                  protecting: [source] + [protectedReference].compactMap { $0 })
+            } catch {
+                return .failure(error)
+            }
+            let written = await Self.offMain { () throws -> Written in
+                switch job {
+                case .direct(let plan):
+                    return .notes(try MediaRepair.repair(plan, source: source, to: output.temporary, progress: progress))
+                case .rebuild(let repairer, let reference, let analysis):
+                    return .report(try repairer.write(analysis, reference: reference, to: output.temporary, progress: progress))
                 }
-            }.value
+            }
+            guard case .success(let value) = written, !Task.isCancelled else {
+                output.discard()
+                if case .failure(let error) = written { return .failure(error) }
+                return .failure(CancellationError())
+            }
+            // Finishing isn't cancelled part-way: once it starts, the copy is put in place.
+            switch await Self.offMain({ try output.commit() }) {
+            case .success(let url): return .success((value, url))
+            case .failure(let error):
+                output.discard()
+                return .failure(error)
+            }
         }
         switch result {
-        case .success(let report):
+        case .success((.notes(let notes), let url)):
+            self.notes = notes
+            let duration = (try? await Self.offMain { try Demuxers.open(url).duration }.get()) ?? nil
+            phase = .finished(MovieRepairReport(referenceName: "", videoFrames: 0, keyframes: 0, audioFrames: [],
+                                                duration: duration ?? 0, frameRate: 0, unrecoveredBytes: 0), url)
+        case .success((.report(let report), let url)):
             self.report = report
-            phase = .finished(report, output)
-        case .failure(let error): phase = .failed(error.localizedDescription)
-        case nil: phase = .failed("The original file couldn't be read while saving.")
+            phase = .finished(report, url)
+        case .failure(let error):
+            phase = .failed(error is CancellationError || Task.isCancelled ? "The repair was cancelled." : error.localizedDescription)
+        case nil:
+            phase = .failed("The original file couldn't be read while saving.")
         }
     }
 }
@@ -155,6 +199,7 @@ struct RepairView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var session: RepairSession
     @State private var didReplace = false
+    @State private var saving: Task<Void, Never>?
 
     init(title: Title, playbackID: String) {
         _session = State(initialValue: RepairSession(title: title, playbackID: playbackID))
@@ -182,6 +227,8 @@ struct RepairView: View {
         .padding(28)
         .frame(width: 560)
         .task { await session.start(library: model.library) }
+        // Closing the sheet (Cancel, Escape) stops a save in progress.
+        .onDisappear { saving?.cancel() }
     }
 
     @ViewBuilder
@@ -284,13 +331,13 @@ struct RepairView: View {
             switch session.phase {
             case .review:
                 Button("Cancel", role: .cancel) { dismiss() }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 Button("Save Repaired Copy…", action: chooseDestination)
                     .buttonStyle(.glassProminent)
                     .keyboardShortcut(.defaultAction)
             case .finished(_, let url):
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 if !didReplace {
                     Button("Use in Library") {
                         Task {
@@ -298,7 +345,7 @@ struct RepairView: View {
                             didReplace = true
                         }
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 }
                 Button("Done") { dismiss() }
                     .buttonStyle(.glassProminent)
@@ -309,7 +356,7 @@ struct RepairView: View {
                     .keyboardShortcut(.defaultAction)
             default:
                 Button("Cancel", role: .cancel) { dismiss() }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
             }
         }
         .controlSize(.large)
@@ -348,7 +395,7 @@ struct RepairView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: session.fileExtension) ?? .movie]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await session.save(to: url, library: model.library) }
+        saving = Task { await session.save(to: url, library: model.library) }
     }
 
     static func format(_ seconds: Double) -> String {

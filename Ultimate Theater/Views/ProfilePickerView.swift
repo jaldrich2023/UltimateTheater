@@ -24,7 +24,11 @@ struct ProfilePickerView: View {
             if model.profiles.isEmpty {
                 SetupWizardView()
             } else {
-                picker
+                // Scrolls only when the window is too short for every row of profiles.
+                FittingScrollView {
+                    picker
+                        .padding(.vertical, 32)
+                }
             }
             if let draft = editing {
                 ProfileEditor(draft: draft) { editing = nil }
@@ -41,6 +45,9 @@ struct ProfilePickerView: View {
         }
     }
 
+    /// The profile editor or a PIN prompt is open over the picker, so its keys belong there.
+    private var isCoveredByPanel: Bool { editing != nil || model.pinRequest != nil }
+
     // MARK: Who's watching
 
     private var picker: some View {
@@ -53,7 +60,8 @@ struct ProfilePickerView: View {
             }
             VStack(spacing: 36) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(alignment: .top, spacing: 40) {
+                    // Five tiles a row still fit the smallest window (1024 points).
+                    HStack(alignment: .top, spacing: 30) {
                         ForEach(row) { tile($0) }
                     }
                 }
@@ -72,9 +80,13 @@ struct ProfilePickerView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.theaterGlass)
                 .controlSize(.large)
-                .keyboardShortcut(isManaging ? .cancelAction : KeyboardShortcut("m", modifiers: .command))
+                // ⌘E: ⌘M is the system's Minimize. Escape belongs to the editor or PIN pad
+                // while either is open over the picker.
+                .keyboardShortcut(isCoveredByPanel ? nil
+                                  : isManaging ? .cancelAction : KeyboardShortcut("e", modifiers: .command))
+                .help(isManaging ? "Done (Esc)" : "Manage Profiles (⌘E)")
             }
             Text(isManaging ? "Choose a profile to edit or remove it" : "Press 1–\(min(model.profiles.count, 9)) to choose a profile")
                 .font(.callout)
@@ -107,7 +119,9 @@ struct ProfilePickerView: View {
             ProfileTile(profile: profile, isLastUsed: profile.id == model.lastProfileID, isManaging: isManaging) {
                 if isManaging { editing = ProfileDraft(profile) } else { model.requestOpen(profile) }
             }
-            .numberShortcut(index)
+            // Number keys choose profiles only while nothing (the editor, a PIN pad and its
+            // digits, or managing) needs them.
+            .numberShortcut(index, isEnabled: !isCoveredByPanel && !isManaging)
             .contextMenu {
                 Button("Edit Profile…", systemImage: "pencil") {
                     model.requireAdministrator("Enter the administrator PIN to edit \(profile.name).") { editing = ProfileDraft(profile) }
@@ -118,7 +132,9 @@ struct ProfilePickerView: View {
             AddProfileTile(title: "Add Profile") {
                 model.requireAdministrator("Enter the administrator PIN to add a profile.") { editing = ProfileDraft() }
             }
-                .keyboardShortcut("n", modifiers: .command)
+                // ⇧⌘N: ⌘N belongs to the File menu.
+                .keyboardShortcut(isCoveredByPanel ? nil : KeyboardShortcut("n", modifiers: [.command, .shift]))
+                .help("Add Profile (⇧⌘N)")
                 .appearing(hasAppeared, delay: Double(model.profiles.count) * 0.07)
         }
     }
@@ -140,12 +156,8 @@ private struct ProfileBackdrop: View {
 private extension View {
     /// Number keys 1–9 choose the first nine profiles.
     @ViewBuilder
-    func numberShortcut(_ index: Int) -> some View {
-        if index < 9 {
-            keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
-        } else {
-            self
-        }
+    func numberShortcut(_ index: Int, isEnabled: Bool) -> some View {
+        keyboardShortcut(index < 9 && isEnabled ? KeyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: []) : nil)
     }
 
     /// The picker's staggered entrance.
@@ -167,6 +179,7 @@ private struct ProfileTile: View {
 
     private var caption: String {
         if isManaging { return "Edit" }
+        if profile.isAdministrator { return "Administrator" }
         return profile.ratingLimit == .everything ? " " : profile.ratingLimit.title
     }
 
@@ -270,6 +283,7 @@ struct ProfileDraft: Identifiable {
     var ratingLimit: RatingLimit
     var allowsUnrated: Bool
     var imageData: Data?
+    var isAdministrator = false
     /// Whether the saved profile already has a PIN.
     let hadPIN: Bool
     var pinChange: PINChange = .unchanged
@@ -300,6 +314,7 @@ struct ProfileDraft: Identifiable {
         ratingLimit = profile.ratingLimit
         allowsUnrated = profile.allowsUnrated
         imageData = profile.imageData
+        isAdministrator = profile.isAdministrator
         hadPIN = profile.hasPIN
     }
 
@@ -309,6 +324,7 @@ struct ProfileDraft: Identifiable {
         profile.imageData = imageData
         profile.image = imageData.flatMap(NSImage.init(data:))
         profile.hasPIN = requiresPIN
+        profile.isAdministrator = isAdministrator
         return profile
     }
 }
@@ -321,6 +337,8 @@ private struct ProfileEditor: View {
     @State private var isConfirmingDelete = false
     @State private var isDropTargeted = false
     @State private var hasAdministratorPIN = AdministratorPIN.isSet
+    /// Shown when the Keychain refused a new administrator PIN.
+    @State private var pinSaveError: String?
     @FocusState private var isNameFocused: Bool
     let close: () -> Void
 
@@ -346,22 +364,35 @@ private struct ProfileEditor: View {
                 .allowsHitTesting(false)
                 .animation(.smooth, value: draft.paletteIndex)
 
-            HStack(alignment: .top, spacing: 44) {
-                identity
-                VStack(alignment: .leading, spacing: 26) {
-                    nameField
-                    colorPicker
-                    iconPicker
-                    ratingPicker
+            // Scrolls only when the window is too short for the whole panel.
+            FittingScrollView {
+                ZStack {
+                    // Clicking around the panel closes it, as on the dimmed backdrop.
+                    Color.clear
+                        .contentShape(.rect)
+                        .onTapGesture(perform: close)
+                    HStack(alignment: .top, spacing: 44) {
+                        identity
+                        VStack(alignment: .leading, spacing: 26) {
+                            nameField
+                            colorPicker
+                            iconPicker
+                            administratorPicker
+                            if !draft.isAdministrator {
+                                ratingPicker
+                            }
+                        }
+                        .frame(width: 520)
+                    }
+                    .padding(.horizontal, 44)
+                    .padding(.top, 40)
+                    .padding(.bottom, 96)
+                    .overlay(alignment: .bottom) { actions }
+                    .glassEffect(.regular, in: .rect(cornerRadius: 32))
+                    .shadow(color: .black.opacity(0.5), radius: 40, y: 20)
+                        .padding(.vertical, 24)
                 }
-                .frame(width: 520)
             }
-            .padding(.horizontal, 44)
-            .padding(.top, 40)
-            .padding(.bottom, 96)
-            .overlay(alignment: .bottom) { actions }
-            .glassEffect(.regular, in: .rect(cornerRadius: 32))
-            .shadow(color: .black.opacity(0.5), radius: 40, y: 20)
         }
         .onAppear { isNameFocused = isNew }
         .onExitCommand(perform: close)
@@ -416,7 +447,7 @@ private struct ProfileEditor: View {
                     Button("Use Icon Instead", systemImage: "person.crop.square") { draft.imageData = nil }
                 }
             }
-            .buttonStyle(.glass)
+            .buttonStyle(.theaterGlass)
 
             VStack(alignment: .leading, spacing: 8) {
                 Toggle(isOn: Binding(get: { draft.requiresPIN }, set: setRequiresPIN)) {
@@ -560,14 +591,23 @@ private struct ProfileEditor: View {
                         Spacer(minLength: 0)
                         Button("Set PIN…") {
                             model.requestNewPIN(title: "Administrator PIN", message: "Needed to manage profiles and to leave restricted profiles.") { pin in
-                                AdministratorPIN.set(pin)
-                                hasAdministratorPIN = true
+                                if AdministratorPIN.set(pin) {
+                                    hasAdministratorPIN = true
+                                    pinSaveError = nil
+                                } else {
+                                    pinSaveError = "The administrator PIN couldn't be saved to the Keychain. Try again."
+                                }
                             }
                         }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.theaterGlass)
                     }
                     .padding(10)
                     .background(.orange.opacity(0.12), in: .rect(cornerRadius: 10))
+                }
+                if let pinSaveError {
+                    Label(pinSaveError, systemImage: "xmark.octagon.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
         }
@@ -581,21 +621,48 @@ private struct ProfileEditor: View {
                 } label: {
                     Label("Remove Profile", systemImage: "trash")
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.theaterGlass)
             }
             Spacer()
+            // Escape and Return belong to a PIN pad opened over the editor.
             Button("Cancel", action: close)
-                .buttonStyle(.glass)
-                .keyboardShortcut(.cancelAction)
+                .buttonStyle(.theaterGlass)
+                .keyboardShortcut(model.pinRequest == nil ? .cancelAction : nil)
             Button(isNew ? "Create Profile" : "Save", action: save)
                 .buttonStyle(.glassProminent)
                 .tint(accent)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(model.pinRequest == nil ? .defaultAction : nil)
                 .disabled(!isValid)
         }
         .controlSize(.large)
         .padding(.horizontal, 44)
         .padding(.bottom, 32)
+    }
+
+    /// The household administrator adds, approves, and manages media; there's always exactly one.
+    private var administratorPicker: some View {
+        let isOnlyAdministrator = draft.isAdministrator && !model.hasOtherAdministrator(than: draft.id)
+        return section("Role") {
+            Toggle(isOn: Binding(get: { draft.isAdministrator }, set: { value in
+                withAnimation(.smooth) {
+                    draft.isAdministrator = value
+                    if value { draft.ratingLimit = .everything }
+                }
+            })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Household administrator")
+                    Text(isOnlyAdministrator
+                         ? "Adds and approves media and manages the library. Make another profile the administrator to change this."
+                         : "Adds and approves media and manages the library. Only one profile can be the administrator.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(accent)
+            .disabled(isOnlyAdministrator)
+        }
     }
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -683,8 +750,19 @@ private struct FlowingRatings: View {
 struct ProfileAvatar: View {
     let profile: Profile
     var size: CGFloat = 32
+    /// Marks the household administrator with a gold crown.
+    var showsAdministratorBadge = true
 
     var body: some View {
+        avatar
+            .overlay(alignment: .topTrailing) {
+                if showsAdministratorBadge, profile.isAdministrator {
+                    AdministratorBadge(avatarSize: size)
+                }
+            }
+    }
+
+    private var avatar: some View {
         RoundedRectangle(cornerRadius: size * 0.24)
             .fill(LinearGradient(colors: profile.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
             .frame(width: size, height: size)
@@ -702,6 +780,26 @@ struct ProfileAvatar: View {
                 }
             }
             .accessibilityHidden(true)
+    }
+}
+
+/// The gold crown on the administrator's avatar.
+struct AdministratorBadge: View {
+    let avatarSize: CGFloat
+
+    private var diameter: CGFloat { max(14, avatarSize * 0.3) }
+
+    var body: some View {
+        Image(systemName: "crown.fill")
+            .font(.system(size: diameter * 0.52, weight: .bold))
+            .foregroundStyle(Theme.gold)
+            .frame(width: diameter, height: diameter)
+            .background(.black.opacity(0.7), in: .circle)
+            .overlay(Circle().strokeBorder(Theme.gold.opacity(0.6), lineWidth: max(1, diameter * 0.06)))
+            .offset(x: diameter * 0.3, y: -diameter * 0.3)
+            .accessibilityElement()
+            .accessibilityLabel("Administrator")
+            .help("Administrator")
     }
 }
 

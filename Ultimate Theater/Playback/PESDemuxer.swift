@@ -48,6 +48,8 @@ nonisolated protocol PESReader: AnyObject {
     var streams: [Int: ElementaryStreamInfo] { get }
     /// When set, payloads of other streams are skipped without being assembled.
     var wantedStreams: Set<Int>? { get set }
+    /// When set, reading stops (`nextPES` returns nil) once it reaches this byte offset.
+    var readLimit: UInt64? { get set }
     func nextPES() throws -> PESPacket?
     /// Restarts reading at `offset`, resynchronizing to the next packet boundary.
     func reposition(to offset: UInt64) throws
@@ -126,6 +128,8 @@ nonisolated final class PESDemuxer: MediaDemuxer {
     private var isAtEnd = false
 
     private static let probeBytes: UInt64 = 24 << 20
+    /// Most payload held for an audio or subtitle packet awaiting its successor.
+    private static let maxHeldBytes = 8 << 20
 
     init(reader: PESReader) throws {
         self.reader = reader
@@ -258,7 +262,10 @@ nonisolated final class PESDemuxer: MediaDemuxer {
         }
         // Audio and subtitles: a PES without a timestamp continues the previous one.
         guard let pts = pes.pts.map(seconds) else {
-            held[pes.stream]?.data.append(payload)
+            // Untimed payloads beyond any real packet size are damage; drop them.
+            if let count = held[pes.stream]?.data.count, count + payload.count <= Self.maxHeldBytes {
+                held[pes.stream]?.data.append(payload)
+            }
             return
         }
         if let previous = held[pes.stream] { ready.append(previous) }
@@ -319,14 +326,18 @@ nonisolated final class PESDemuxer: MediaDemuxer {
         var high = reader.size
         let saved = reader.wantedStreams
         reader.wantedStreams = [stream]
-        defer { reader.wantedStreams = saved }
+        defer {
+            reader.wantedStreams = saved
+            reader.readLimit = nil
+        }
         while high - low > 512 << 10 {
             let middle = low + (high - low) / 2
             try reader.reposition(to: middle)
+            // Each probe reads at most 4 MB, so a stream missing from part of the file can't
+            // turn a probe into a scan to the end.
+            reader.readLimit = middle + (4 << 20)
             var found: Double?
-            var scanned = 0
-            while let pes = try reader.nextPES(), scanned < 4000 {
-                scanned += 1
+            while let pes = try reader.nextPES() {
                 if pes.stream == stream, let pts = pes.pts { found = seconds(pts); break }
             }
             if let found, found < time { low = middle } else { high = middle }
@@ -340,7 +351,11 @@ nonisolated final class PESDemuxer: MediaDemuxer {
         try reader.reposition(to: offset)
         let saved = reader.wantedStreams
         reader.wantedStreams = [videoID]
-        defer { reader.wantedStreams = saved }
+        reader.readLimit = offset + (512 << 20) // Bounded even where the video stream is missing.
+        defer {
+            reader.wantedStreams = saved
+            reader.readLimit = nil
+        }
         var splitter = AccessUnitSplitter(codec: track.codec, frameDuration: track.frameDuration)
         var best: (offset: UInt64, time: Double)?
         var scanned: UInt64 = 0
@@ -525,7 +540,16 @@ nonisolated struct AccessUnitSplitter {
     private var frameDuration: Double
     private let hasFixedRate: Bool
     private var buffer: [UInt8] = []
+    /// Start of the unconsumed bytes in `buffer` (compacted once per push).
+    private var head = 0
     private var scanned = 0
+    /// Most unconsumed bytes held without completing a unit; beyond this the data is damage.
+    private static let maxBufferedBytes = 16 << 20
+    /// HEVC: whether the first random-access (IRAP) picture after (re)synchronizing was seen,
+    /// and whether the RASL pictures associated with the latest IRAP picture (which reference
+    /// pictures before it) are dropped.
+    private var sawRandomAccess = false
+    private var droppingRASL = false
     private var stamps: [Stamp] = []
     /// The stamp of the unit in progress, and whether its start was seen.
     private var current: Stamp?
@@ -565,19 +589,18 @@ nonisolated struct AccessUnitSplitter {
             if !isSynchronized {
                 // Data before the first unit start (after a seek) can't be decoded.
                 if startsUnit {
-                    buffer.removeFirst(i)
-                    shiftStamps(by: i)
+                    head = i
                     isSynchronized = true
-                    current = takeStamp(at: 0)
+                    current = takeStamp(at: i)
                     sawPicture = role == .firstSlice
-                    i = 3
+                    i += 3
                     continue
                 }
             } else if startsUnit, sawPicture {
                 if let unit = emit(upTo: i) { units.append(unit) }
-                current = takeStamp(at: 0)
+                current = takeStamp(at: i)
                 sawPicture = role == .firstSlice
-                i = 3
+                i += 3
                 continue
             } else if role == .firstSlice || role == .slice {
                 sawPicture = true
@@ -585,11 +608,34 @@ nonisolated struct AccessUnitSplitter {
             i += 3
         }
         scanned = i
+        if !isSynchronized { head = max(head, min(i, buffer.count)) } // Undecodable lead-in.
+        compact()
+        if buffer.count > Self.maxBufferedBytes {
+            // No unit boundary in far more data than any picture: start over at the next one.
+            buffer = []
+            stamps = []
+            current = nil
+            isSynchronized = false
+            sawPicture = false
+            sawRandomAccess = false // Pictures were lost: the next CRA starts decoding afresh.
+            scanned = 0
+        }
         return units
     }
 
+    /// Drops consumed bytes, keeping stamps and the scan position relative to the buffer.
+    private mutating func compact() {
+        guard head > 0 else { return }
+        buffer.removeFirst(head)
+        shiftStamps(by: head)
+        while stamps.count > 1, stamps[1].at == 0 { stamps.removeFirst() }
+        scanned = max(0, scanned - head)
+        head = 0
+    }
+
     mutating func flush() -> [Unit] {
-        guard isSynchronized, sawPicture, !buffer.isEmpty, let unit = emit(upTo: buffer.count) else { return [] }
+        guard isSynchronized, sawPicture, buffer.count > head, let unit = emit(upTo: buffer.count) else { return [] }
+        compact()
         return [unit]
     }
 
@@ -646,10 +692,8 @@ nonisolated struct AccessUnitSplitter {
     }
 
     private mutating func emit(upTo end: Int) -> Unit? {
-        let bytes = Array(buffer[0..<end])
-        buffer.removeFirst(end)
-        shiftStamps(by: end)
-        scanned = 0
+        let bytes = Array(buffer[head..<end])
+        head = end
         let stamp = current
         let data = Data(bytes)
         let isKeyframe = Self.isKeyframe(bytes, syntax: syntax)
@@ -682,7 +726,26 @@ nonisolated struct AccessUnitSplitter {
             gopMaxReference = max(gopMaxReference, reference)
         }
         lastDTS = dts
+        if syntax == .hevc, let type = Self.hevcPictureType(bytes) {
+            // RASL pictures reference pictures before their associated IRAP picture (the latest
+            // one in decode order). When decoding started at that picture (a CRA after a seek,
+            // or mid-broadcast) or it's a BLA, those were never decoded: drop the RASL pictures
+            // until the next IRAP picture, as the spec requires (H.265 8.1.3). RADL and other
+            // leading pictures interleaved with them don't end the dropping.
+            if (16...23).contains(type) {
+                // BLA (16–18) always; a CRA (21) only when decoding starts at it; IDR has no RASL.
+                droppingRASL = (16...18).contains(type) || (type == 21 && !sawRandomAccess)
+                sawRandomAccess = true
+            } else if sawRandomAccess, droppingRASL, type == 8 || type == 9 {
+                return nil
+            }
+        }
         return Unit(data: data, pts: pts, dts: dts, duration: frameDuration, isKeyframe: isKeyframe, offset: stamp?.offset ?? 0)
+    }
+
+    /// NAL unit type of the first slice in an HEVC access unit.
+    private static func hevcPictureType(_ b: [UInt8]) -> Int? {
+        PESDemuxer.startCodeOffsets(in: b).lazy.map { Int((b[$0 + 3] >> 1) & 0x3F) }.first { $0 <= 31 }
     }
 
     private static func isKeyframe(_ b: [UInt8], syntax: Syntax) -> Bool {

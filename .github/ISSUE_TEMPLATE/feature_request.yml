@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an idea or improvement for Ultimate Theater.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please search existing issues first, in case someone has already asked for it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe what you're trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to happen?
+      description: Describe the feature as you imagine it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or examples
+      description: Workarounds you use now, or other apps that do something similar.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Playback
+        - Library and metadata
+        - Browsing
+        - Profiles and parental controls
+        - Casting / AirPlay
+        - iPhone remote
+        - Other

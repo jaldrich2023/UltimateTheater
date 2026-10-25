@@ -25,3 +25,14 @@ struct AppBackground: View {
         .accessibilityHidden(true)
     }
 }
+
+/// A hairline marking where a page's background art ends and its content begins.
+struct ArtEdgeDivider: View {
+    var body: some View {
+        LinearGradient(colors: [.clear, .white.opacity(0.18), .white.opacity(0.18), .clear],
+                       startPoint: .leading, endPoint: .trailing)
+            .frame(height: 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}

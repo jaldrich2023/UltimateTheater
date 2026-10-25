@@ -33,19 +33,72 @@ enum CollectionSort: String, CaseIterable, Identifiable {
 
 struct CollectionsView: View {
     @Environment(AppModel.self) private var model
+
+    var body: some View {
+        // A ratings query (and fresh filters) per profile.
+        CollectionsBrowser(profileID: model.profile?.id ?? "")
+            .id(model.profile?.id)
+    }
+}
+
+/// Everything the Collections grid depends on; its cached results are rebuilt only when this changes.
+private struct CollectionInputs: Equatable {
+    let collections: [MovieCollection]
+    /// `AppModel.catalogVersion` when `collections` was taken; collections are rebuilt with
+    /// the catalog, so equal versions mean equal collections.
+    let catalogVersion: Int
+    let filter: TitleFilter
+    let sort: CollectionSort
+    let ratings: [String: Double]
+
+    /// Compares the catalog version rather than every movie of every collection.
+    static func == (lhs: CollectionInputs, rhs: CollectionInputs) -> Bool {
+        lhs.catalogVersion == rhs.catalogVersion && lhs.filter == rhs.filter && lhs.sort == rhs.sort
+            && lhs.ratings == rhs.ratings && lhs.collections.count == rhs.collections.count
+    }
+}
+
+/// Filtered, sorted collections plus what the header, filter bar, and jump index need.
+private struct CollectionResults {
+    let inputs: CollectionInputs
+    let collections: [MovieCollection]
+    /// Every movie in any collection, for the filter options.
+    let members: [Title]
+    let movieCount: Int
+    let available: Set<Character>
+    let letters: [MovieCollection.ID: Character]
+    /// Changes whenever the shown order changes; drives the grid's re-sort animation.
+    var version: Int
+
+    init(_ inputs: CollectionInputs, version: Int) {
+        self.inputs = inputs
+        let filter = inputs.filter, ratings = inputs.ratings
+        // A collection is shown when any of its movies matches the filters.
+        collections = inputs.sort.apply(inputs.collections.filter { collection in
+            !filter.isActive || collection.movies.contains { filter.matches($0, ratings: ratings) }
+        })
+        members = inputs.collections.flatMap(\.movies)
+        movieCount = collections.reduce(0) { $0 + $1.movies.count }
+        var letters: [MovieCollection.ID: Character] = [:]
+        for collection in collections { letters[collection.id] = collection.indexCharacter }
+        self.letters = letters
+        available = Set(letters.values)
+        self.version = version
+    }
+}
+
+private struct CollectionsBrowser: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
-    @Query private var allRatings: [UserRating]
+    /// Only this profile's ratings.
+    @Query private var profileRatings: [UserRating]
 
     @State private var filter = TitleFilter()
     @State private var sort: CollectionSort = .alphabetical
-    @State private var topID: MovieCollection.ID?
+    @State private var cache: CollectionResults?
 
-    private let columns = [GridItem(.adaptive(minimum: 180, maximum: 230), spacing: 26, alignment: .top)]
-
-    private var ratings: [String: Double] {
-        let profileID = model.profile?.id
-        return Dictionary(allRatings.filter { $0.profileID == profileID }.map { ($0.titleID, $0.score) },
-                          uniquingKeysWith: { first, _ in first })
+    init(profileID: String) {
+        _profileRatings = Query(filter: #Predicate<UserRating> { $0.profileID == profileID })
     }
 
     var body: some View {
@@ -57,22 +110,18 @@ struct CollectionsView: View {
         }
     }
 
+    @ViewBuilder
     private func content(_ collections: [MovieCollection]) -> some View {
-        let ratings = ratings
-        let members = collections.flatMap(\.movies)
-        // A collection is shown when any of its movies matches the filters.
-        let results = sort.apply(collections.filter { collection in
-            !filter.isActive || collection.movies.contains { filter.matches($0, ratings: ratings) }
-        })
-        let current: Character? = sort == .alphabetical
-            ? (results.first { $0.id == topID } ?? results.first)?.indexCharacter
-            : nil
+        let ratings = Dictionary(profileRatings.map { ($0.titleID, $0.score) }, uniquingKeysWith: { first, _ in first })
+        let inputs = CollectionInputs(collections: collections, catalogVersion: model.catalogVersion, filter: filter, sort: sort, ratings: ratings)
+        // Only the first frame (before onChange fills the cache) works the results out inline.
+        let current = cache.flatMap { $0.inputs == inputs ? $0 : nil } ?? CollectionResults(inputs, version: cache?.version ?? 0)
 
-        return VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .lastTextBaseline) {
-                    PageHeader(title: "Collections",
-                               subtitle: "\(results.count) collections · \(results.reduce(0) { $0 + $1.movies.count }) movies")
+                    PageHeader(title: Text("Collections"),
+                               subtitle: Text("^[\(current.collections.count) collection](inflect: true) · ^[\(current.movieCount) movie](inflect: true)"))
                     Picker("Sort", selection: $sort) {
                         ForEach(CollectionSort.allCases) { Text($0.rawValue).tag($0) }
                     }
@@ -80,56 +129,38 @@ struct CollectionsView: View {
                     .fixedSize()
                     .padding(.trailing, pageMargin)
                 }
-                TitleFilterBar(titles: members, ratings: ratings, filter: $filter)
+                TitleFilterBar(titles: current.members, ratings: ratings, filter: $filter)
                     .padding(.horizontal, pageMargin)
             }
             .padding(.top, 28)
             .padding(.bottom, 12)
 
-            HStack(spacing: 0) {
-                ScrollView {
-                    if results.isEmpty {
-                        ContentUnavailableView {
-                            Label("No Matches", systemImage: "line.3.horizontal.decrease.circle")
-                        } description: {
-                            Text("No collection has a movie matching every filter.")
-                        } actions: {
-                            Button("Clear Filters") { withAnimation { filter = TitleFilter() } }
-                                .buttonStyle(.glass)
-                        }
-                        .padding(.top, 60)
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 34) {
-                            ForEach(results) { collection in
-                                CollectionCard(collection: collection)
-                                    .id(collection.id)
-                            }
-                        }
-                        .scrollTargetLayout()
-                        .padding(.leading, pageMargin)
-                        .padding(.trailing, 16)
-                        .padding(.vertical, 16)
-                        .animation(.smooth, value: results.map(\.id))
-                    }
-                }
-                .scrollPosition(id: $topID, anchor: .top)
-                // Fill the width so the jump bar stays at the right edge even with few items.
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SmartCollectionsRow()
+                .padding(.bottom, 8)
 
-                if !results.isEmpty {
-                    AlphabetIndex(available: Set(results.map(\.indexCharacter)), current: current) { character in
-                        jump(to: character, in: collections)
-                    }
-                    .frame(maxHeight: 640)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
-                }
-            }
+            CollectionGridScroller(results: current, isAlphabetical: sort == .alphabetical,
+                                   clearFilters: { withAnimation { filter = TitleFilter() } },
+                                   switchToAlphabetical: { sort = .alphabetical })
+        }
+        .background { AppBackground() }
+        .onChange(of: inputs, initial: true) { _, inputs in
+            let version = cache?.version ?? 0
+            var rebuilt = CollectionResults(inputs, version: version)
+            if rebuilt.collections.map(\.id) != cache?.collections.map(\.id) { rebuilt.version = version + 1 }
+            cache = rebuilt
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SmartCollectionsRow()
+                .padding(.top, 28)
+            franchiseEmptyState
         }
         .background { AppBackground() }
     }
 
-    private var emptyState: some View {
+    private var franchiseEmptyState: some View {
         ContentUnavailableView {
             Label("No Collections Yet", systemImage: "square.stack.3d.up")
         } description: {
@@ -137,20 +168,82 @@ struct CollectionsView: View {
         } actions: {
             HStack {
                 Button("Metadata Sources…") { openSettings() }
-                    .buttonStyle(.glass)
-                Button("Refresh All Info") { Task { await model.library.refreshMetadata(force: true) } }
-                    .buttonStyle(.glassProminent)
-                    .disabled(model.library.titles.isEmpty || model.library.isBusy)
+                    .buttonStyle(.theaterGlass)
+                if model.canManageLibrary {
+                    Button("Refresh All Info") { model.refreshInfo() }
+                        .buttonStyle(.glassProminent)
+                        .disabled(model.library.titles.isEmpty || model.library.isBusy)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { AppBackground() }
     }
+}
 
-    private func jump(to character: Character, in collections: [MovieCollection]) {
-        let needsResort = sort != .alphabetical
-        if needsResort { sort = .alphabetical }
-        let sorted = CollectionSort.alphabetical.apply(collections)
+/// The scrolling collection grid and its jump bar. Owns the scroll position, so scrolling
+/// only re-renders this view, not the filters and header above.
+private struct CollectionGridScroller: View {
+    let results: CollectionResults
+    let isAlphabetical: Bool
+    let clearFilters: () -> Void
+    let switchToAlphabetical: () -> Void
+
+    @State private var topID: MovieCollection.ID?
+
+    private let columns = [GridItem(.adaptive(minimum: 180, maximum: 230), spacing: 26, alignment: .top)]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView {
+                if results.collections.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Matches", systemImage: "line.3.horizontal.decrease.circle")
+                    } description: {
+                        Text("No collection has a movie matching every filter.")
+                    } actions: {
+                        Button("Clear Filters", action: clearFilters)
+                            .buttonStyle(.theaterGlass)
+                    }
+                    .containerRelativeFrame([.horizontal, .vertical])
+                } else {
+                    LazyVGrid(columns: columns, spacing: 34) {
+                        ForEach(results.collections) { collection in
+                            CollectionCard(collection: collection)
+                                .id(collection.id)
+                        }
+                    }
+                    .scrollTargetLayout()
+                    .padding(.leading, pageMargin)
+                    .padding(.trailing, 16)
+                    .padding(.vertical, 16)
+                    .animation(.smooth, value: results.version)
+                }
+            }
+            .scrollPosition(id: $topID, anchor: .top)
+            // Fill the width so the jump bar stays at the right edge even with few items.
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !results.collections.isEmpty {
+                AlphabetIndex(available: results.available, current: currentLetter) { character in
+                    jump(to: character)
+                }
+                .frame(maxHeight: 640)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var currentLetter: Character? {
+        guard isAlphabetical else { return nil }
+        return topID.flatMap { results.letters[$0] } ?? results.collections.first?.indexCharacter
+    }
+
+    private func jump(to character: Character) {
+        let needsResort = !isAlphabetical
+        if needsResort { switchToAlphabetical() }
+        let sorted = needsResort ? CollectionSort.alphabetical.apply(results.collections) : results.collections
         let order = AlphabetIndex.characters
         guard let start = order.firstIndex(of: character) else { return }
         let target = order[start...].lazy.compactMap { letter in sorted.first { $0.indexCharacter == letter } }.first ?? sorted.last
@@ -210,7 +303,7 @@ private struct CollectionCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack {
                     // Two offset posters behind suggest a stack.
-                    ForEach(Array(collection.movies.prefix(3).enumerated().reversed()), id: \.offset) { index, movie in
+                    ForEach(Array(collection.movies.prefix(3).enumerated().reversed()), id: \.element.id) { index, movie in
                         if index > 0 {
                             ArtworkView(title: movie, style: .poster)
                                 .clipShape(.rect(cornerRadius: Theme.cardRadius))
@@ -267,7 +360,7 @@ private struct CollectionCard: View {
 /// One collection: backdrop header, play-in-order, and its movies by release date.
 struct CollectionDetailView: View {
     @Environment(AppModel.self) private var model
-    @Query private var allProgress: [WatchProgress]
+    @ScaledMetric(relativeTo: .largeTitle) private var titleSize: CGFloat = 54
 
     let collectionID: Int
 
@@ -275,11 +368,11 @@ struct CollectionDetailView: View {
         model.collections.first { $0.id == collectionID }
     }
 
-    /// The first movie this profile hasn't finished.
+    /// The first movie this profile hasn't finished, from the model's cached watch history.
     private func nextUp(in collection: MovieCollection) -> Title? {
-        let profileID = model.profile?.id
+        let history = model.watchProgressByTitle
         return collection.movies.first { movie in
-            !allProgress.contains { $0.profileID == profileID && $0.titleID == movie.id && $0.isFinished }
+            !(history[movie.id]?.contains { $0.isFinished } ?? false)
         } ?? collection.movies.first
     }
 
@@ -306,6 +399,7 @@ struct CollectionDetailView: View {
         } else {
             ContentUnavailableView("Collection Unavailable", systemImage: "square.stack.3d.up",
                                    description: Text("None of this collection's movies are in your library anymore."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -326,6 +420,8 @@ struct CollectionDetailView: View {
                 LinearGradient(colors: [.clear, .clear, Theme.background], startPoint: .top, endPoint: .bottom)
             }
             .backgroundExtensionEffect()
+            .transaction { $0.animation = nil }
+            .overlay(alignment: .bottom) { ArtEdgeDivider() }
 
             VStack(alignment: .leading, spacing: 14) {
                 Text("COLLECTION")
@@ -333,7 +429,7 @@ struct CollectionDetailView: View {
                     .tracking(1.5)
                     .foregroundStyle(Theme.accent)
                 Text(collection.info.name)
-                    .font(.system(size: 54, weight: .black))
+                    .font(.system(size: titleSize, weight: .black))
                     .fontWidth(.condensed)
                     .lineLimit(2)
                     .minimumScaleFactor(0.6)

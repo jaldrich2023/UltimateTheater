@@ -51,7 +51,7 @@ nonisolated struct WikipediaProvider: MetadataProvider {
             let director = String(match.1)
             record.director = director.prefix(1).uppercased() + director.dropFirst()
         }
-        record.posterURL = summary.originalimage.flatMap { URL(string: Self.absolute($0.source)) }
+        record.posterURL = summary.originalimage.flatMap { ArtworkCache.webArtworkURL(string: Self.absolute($0.source)) }
         return record
     }
 

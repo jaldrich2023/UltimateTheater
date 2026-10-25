@@ -5,14 +5,21 @@
 
 import SwiftUI
 
-/// Full-bleed, auto-advancing billboard at the top of Home. Pauses while the pointer is over it.
+/// Full-bleed, auto-advancing billboard at the top of Home. Pauses while the pointer is over it
+/// or a full-window player covers it, and stays put when Reduce Motion is on.
 struct HeroCarousel: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let titles: [Title]
 
     @State private var index = 0
     @State private var isHovered = false
-    @State private var isInMyList = false
+    @ScaledMetric(relativeTo: .largeTitle) private var titleSize: CGFloat = 64
+
+    /// Whether the slides advance on their own right now.
+    private var autoAdvances: Bool {
+        titles.count > 1 && !isHovered && !reduceMotion && !model.isPlayerFullWindow
+    }
 
     private var title: Title? { titles[safe: index] }
 
@@ -24,7 +31,8 @@ struct HeroCarousel: View {
                     .padding(.horizontal, pageMargin)
                     .padding(.bottom, 56)
                     .id(title.id)
-                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 12)), removal: .opacity))
+                    .transition(reduceMotion ? .opacity
+                                : .asymmetric(insertion: .opacity.combined(with: .offset(y: 12)), removal: .opacity))
                 if titles.count > 1 {
                     pageIndicator
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -35,26 +43,26 @@ struct HeroCarousel: View {
             .containerRelativeFrame(.vertical) { height, _ in max(height * 0.74, 480) }
             .clipped()
             .onHover { isHovered = $0 }
-            .task(id: "\(index)-\(isHovered)") {
-                // Restart the timer whenever the slide changes or the pointer leaves.
-                guard !isHovered, titles.count > 1 else { return }
-                try? await Task.sleep(for: .seconds(9))
-                guard !Task.isCancelled else { return }
+            .task(id: TimerKey(index: index, isRunning: autoAdvances)) {
+                // Restart the timer whenever the slide changes or advancing resumes.
+                guard autoAdvances else { return }
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, autoAdvances else { return }
                 advance(by: 1)
             }
-            .onChange(of: title.id, initial: true) { isInMyList = model.isInMyList(title) }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Featured: \(title.name)")
+            .onChange(of: titles.count) { _, count in
+                // Fewer featured titles (a removal, or a stricter profile): stay on a real slide.
+                if index >= count { index = max(count - 1, 0) }
+            }
         }
     }
 
     private func backdrop(for title: Title) -> some View {
         ZStack {
+            // Shown at full width straight away, without drifting or panning.
             ArtworkView(title: title, style: .backdrop)
-                // Slow Ken Burns drift keeps the billboard alive.
-                .phaseAnimator([1.0, 1.07]) { content, scale in
-                    content.scaleEffect(scale, anchor: .trailing)
-                } animation: { _ in .easeInOut(duration: 14) }
                 .id(title.id)
                 .transition(.opacity)
             LinearGradient(stops: [
@@ -65,12 +73,13 @@ struct HeroCarousel: View {
             LinearGradient(colors: [.clear, .clear, Theme.background], startPoint: .top, endPoint: .bottom)
         }
         .backgroundExtensionEffect()
+        .overlay(alignment: .bottom) { ArtEdgeDivider() }
     }
 
     private func info(for title: Title) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title.name)
-                .font(.system(size: 64, weight: .black))
+                .font(.system(size: titleSize, weight: .black))
                 .fontWidth(.condensed)
                 .lineLimit(2)
                 .minimumScaleFactor(0.6)
@@ -83,34 +92,48 @@ struct HeroCarousel: View {
                     .lineLimit(3)
                     .frame(maxWidth: 560, alignment: .leading)
             }
-            HStack(spacing: 12) {
-                Button { model.playResuming(title) } label: {
-                    Label("Play", systemImage: "play.fill")
-                }
-                .buttonStyle(PlayButtonStyle())
-                .keyboardShortcut(.return, modifiers: [])
+            let isInMyList = model.isInMyList(title)
+            // One container so the adjacent glass buttons render and blend together.
+            GlassEffectContainer(spacing: 12) {
+                HStack(spacing: 12) {
+                    Button { model.playResuming(title) } label: {
+                        Label("Play", systemImage: "play.fill")
+                    }
+                    .buttonStyle(PlayButtonStyle())
+                    // Return belongs to the player, a PIN pad, or the search field while they're in use.
+                    .keyboardShortcut(model.acceptsPlayReturnKey ? KeyboardShortcut(.return, modifiers: []) : nil)
 
-                Button { model.open(title) } label: {
-                    Label("More Info", systemImage: "info.circle")
-                        .font(.headline)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.glass)
+                    Button { model.open(title) } label: {
+                        Label("More Info", systemImage: "info.circle")
+                            .font(.headline)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.theaterGlass)
 
-                Button {
-                    model.toggleMyList(title)
-                    isInMyList.toggle()
-                } label: {
-                    Image(systemName: isInMyList ? "checkmark" : "plus")
-                        .font(.headline)
-                        .contentTransition(.symbolEffect(.replace))
-                        .frame(width: 28, height: 28)
+                    Button {
+                        model.toggleMyList(title)
+                    } label: {
+                        Image(systemName: isInMyList ? "checkmark" : "plus")
+                            .font(.headline)
+                            .contentTransition(.symbolEffect(.replace))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.theaterGlassCircle)
+                    .help(isInMyList ? "Remove from My List" : "Add to My List")
+                    .accessibilityLabel(isInMyList ? "Remove from My List" : "Add to My List")
+
+                    let isWatched = model.isWatched(title)
+                    Button { model.setWatched(!isWatched, title) } label: {
+                        Image(systemName: isWatched ? "checkmark.circle.fill" : "checkmark.circle")
+                            .font(.headline)
+                            .contentTransition(.symbolEffect(.replace))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(TheaterGlassButtonStyle(isCircular: true, tint: isWatched ? Theme.accent : nil))
+                    .help(isWatched ? "Watched · Click to mark as unwatched" : "Mark as watched")
+                    .accessibilityLabel(isWatched ? "Mark as unwatched" : "Mark as watched")
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .help(isInMyList ? "Remove from My List" : "Add to My List")
-                .accessibilityLabel(isInMyList ? "Remove from My List" : "Add to My List")
             }
             .padding(.top, 4)
         }
@@ -122,7 +145,7 @@ struct HeroCarousel: View {
         HStack(spacing: 8) {
             ForEach(titles.indices, id: \.self) { i in
                 Button {
-                    withAnimation(.smooth(duration: 0.6)) { index = i }
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.6)) { index = i }
                 } label: {
                     Capsule()
                         .fill(i == index ? .white : .white.opacity(0.35))
@@ -137,8 +160,13 @@ struct HeroCarousel: View {
         .glassEffect(.regular, in: .capsule)
     }
 
+    private struct TimerKey: Equatable {
+        let index: Int
+        let isRunning: Bool
+    }
+
     private func advance(by delta: Int) {
-        withAnimation(.smooth(duration: 0.8)) {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.8)) {
             index = (index + delta + titles.count) % titles.count
         }
     }

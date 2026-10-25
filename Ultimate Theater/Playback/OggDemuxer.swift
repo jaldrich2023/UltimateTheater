@@ -196,7 +196,8 @@ nonisolated final class OggDemuxer: MediaDemuxer {
             var data = state.partial ?? Data()
             state.partial = nil
             data.append(piece.data)
-            if piece.complete { completed.append(data) } else { state.partial = data }
+            // Packets this large only come from damaged lacing; drop rather than grow forever.
+            if piece.complete { completed.append(data) } else { state.partial = data.count <= 16 << 20 ? data : nil }
         }
         if skipsHeaders, state.headersLeft > 0 {
             let skip = min(state.headersLeft, completed.count)

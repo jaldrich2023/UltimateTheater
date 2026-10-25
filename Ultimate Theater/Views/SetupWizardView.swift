@@ -30,8 +30,15 @@ struct SetupWizardView: View {
 
     @Environment(AppModel.self) private var model
     @State private var step: Step = .welcome
-    @State private var draft = ProfileDraft()
+    /// The first profile is always the household administrator (its preview wears the crown).
+    @State private var draft: ProfileDraft = {
+        var draft = ProfileDraft()
+        draft.isAdministrator = true
+        return draft
+    }()
     @State private var hasAdministratorPIN = AdministratorPIN.isSet
+    /// Shown when the Keychain refused the new PIN.
+    @State private var pinSaveError: String?
     @State private var addedFolders: [URL] = []
     @State private var tmdbKey = ""
     @State private var omdbKey = ""
@@ -42,23 +49,26 @@ struct SetupWizardView: View {
     private var settings: MetadataSettings { model.library.metadata.settings }
 
     var body: some View {
-        VStack(spacing: 28) {
-            progress
-            VStack(spacing: 0) {
-                content
-                    .frame(maxWidth: .infinity, minHeight: 360, alignment: .top)
-                    .padding(.horizontal, 48)
-                    .padding(.top, 40)
-                navigation
-                    .padding(.horizontal, 48)
-                    .padding(.vertical, 28)
+        // Scrolls only when the window is too short for the whole step.
+        FittingScrollView {
+            VStack(spacing: 28) {
+                progress
+                VStack(spacing: 0) {
+                    content
+                        .frame(maxWidth: .infinity, minHeight: 360, alignment: .top)
+                        .padding(.horizontal, 48)
+                        .padding(.top, 40)
+                    navigation
+                        .padding(.horizontal, 48)
+                        .padding(.vertical, 28)
+                }
+                .frame(width: 820)
+                .glassEffect(.regular, in: .rect(cornerRadius: 32))
+                .shadow(color: .black.opacity(0.45), radius: 40, y: 20)
+                .animation(.smooth(duration: 0.35), value: step)
             }
-            .frame(width: 820)
-            .glassEffect(.regular, in: .rect(cornerRadius: 32))
-            .shadow(color: .black.opacity(0.45), radius: 40, y: 20)
-            .animation(.smooth(duration: 0.35), value: step)
+            .padding(40)
         }
-        .padding(40)
         .onAppear {
             tmdbKey = settings.apiKey(for: .tmdb) ?? ""
             omdbKey = settings.apiKey(for: .omdb) ?? ""
@@ -88,7 +98,7 @@ struct SetupWizardView: View {
         HStack {
             if step != .welcome, step != .done {
                 Button("Back") { move(-1) }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
             }
             Spacer()
             switch step {
@@ -104,7 +114,7 @@ struct SetupWizardView: View {
             case .pin, .library, .sources:
                 if isStepSkippable {
                     Button("Skip") { move(1) }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.theaterGlass)
                         .keyboardShortcut(.defaultAction)
                 } else {
                     Button("Continue") { move(1) }
@@ -197,7 +207,7 @@ struct SetupWizardView: View {
                 ProfileAvatar(profile: draft.preview, size: 150)
                     .shadow(color: accent.opacity(0.6), radius: 30, y: 10)
                 Button(draft.imageData == nil ? "Choose Picture…" : "Change Picture…", systemImage: "photo", action: choosePicture)
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
             }
             VStack(alignment: .leading, spacing: 20) {
                 header("Create your profile", "This is the household's main profile. It can watch everything and manage the library.")
@@ -253,11 +263,20 @@ struct SetupWizardView: View {
                         .font(.title3.weight(.semibold))
                     Button(hasAdministratorPIN ? "Change PIN…" : "Set Administrator PIN…") {
                         model.requestNewPIN(title: "Administrator PIN", message: "Choose a four-digit PIN for the household.") { pin in
-                            AdministratorPIN.set(pin)
-                            hasAdministratorPIN = true
+                            if AdministratorPIN.set(pin) {
+                                hasAdministratorPIN = true
+                                pinSaveError = nil
+                            } else {
+                                pinSaveError = "The PIN couldn't be saved to the Keychain. Try again."
+                            }
                         }
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
+                    if let pinSaveError {
+                        Label(pinSaveError, systemImage: "xmark.octagon.fill")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
         }
@@ -268,9 +287,9 @@ struct SetupWizardView: View {
             header("Add your movies and shows", "Choose the folders where your videos live. Ultimate Theater finds every movie and episode inside, fetches its details, and keeps watching the folders for anything new.")
             HStack(spacing: 14) {
                 Button("Add Movies Folder…", systemImage: "film") { chooseFolders() }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 Button("Add TV Shows Folder…", systemImage: "tv") { chooseFolders() }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
             }
             .controlSize(.large)
             if !addedFolders.isEmpty || !model.library.folders.isEmpty {
@@ -291,9 +310,10 @@ struct SetupWizardView: View {
                     Text(activity.message).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            Toggle("Automatically add new videos from these folders", isOn: Bindable(model.library).watchesFolders)
-                .toggleStyle(.switch)
-                .tint(Theme.accent)
+            Label("These folders are watched for new videos, which you approve in Library before they're added.",
+                  systemImage: "eye")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -384,7 +404,7 @@ struct SetupWizardView: View {
                         Spacer()
                         checkStatus(for: id)
                         Button("Test Connection") { check(id) }
-                            .buttonStyle(.glass)
+                            .buttonStyle(.theaterGlass)
                             .controlSize(.small)
                             .disabled(sourceChecks[id] == .checking)
                     }
@@ -425,7 +445,7 @@ struct SetupWizardView: View {
                     .onChange(of: key.wrappedValue) { sourceChecks[id] = nil }
                 checkStatus(for: id)
                 Button("Check Key") { check(id) }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                     .controlSize(.small)
                     .disabled(key.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || sourceChecks[id] == .checking)
             }

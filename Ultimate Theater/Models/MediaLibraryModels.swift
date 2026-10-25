@@ -42,18 +42,31 @@ nonisolated struct TrailerInfo: Codable, Hashable, Sendable {
     /// Privacy-enhanced embeddable player URL.
     var embedURL: URL? {
         switch site.lowercased() {
-        case "youtube": URL(string: "https://www.youtube-nocookie.com/embed/\(key)?autoplay=1&rel=0&modestbranding=1&playsinline=1")
-        case "vimeo": URL(string: "https://player.vimeo.com/video/\(key)?autoplay=1")
+        case "youtube": url("www.youtube-nocookie.com", path: "/embed/\(key)",
+                            query: ["autoplay": "1", "rel": "0", "modestbranding": "1", "playsinline": "1"])
+        case "vimeo": url("player.vimeo.com", path: "/video/\(key)", query: ["autoplay": "1"])
         default: nil
         }
     }
 
     var watchURL: URL? {
         switch site.lowercased() {
-        case "youtube": URL(string: "https://www.youtube.com/watch?v=\(key)")
-        case "vimeo": URL(string: "https://vimeo.com/\(key)")
+        case "youtube": url("www.youtube.com", path: "/watch", query: ["v": key])
+        case "vimeo": url("vimeo.com", path: "/\(key)")
         default: nil
         }
+    }
+
+    /// An HTTPS URL on the video site, only for a well-formed key (keys come from TMDB and
+    /// are stored, so they're checked every time they're used).
+    private func url(_ host: String, path: String, query: KeyValuePairs<String, String> = [:]) -> URL? {
+        guard MetadataIDs.isTrailerKey(key) else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = path
+        if !query.isEmpty { components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
+        return components.url
     }
 }
 
@@ -175,6 +188,12 @@ final class MediaEpisode {
     var playbackIssue: String?
     var playbackIssueIsDamage = false
     var qualityBadges: [String] = []
+    /// Skip Intro / Skip Credits times in seconds, found by `SkipSegmentDetector`.
+    var introStart: Double?
+    var introEnd: Double?
+    var creditsStart: Double?
+    /// The detector version that last analysed this episode (0: never).
+    var skipAnalysisVersion: Int = 0
     var show: MediaItem?
 
     init(season: Int, number: Int, name: String, filePath: String, fileBookmark: Data?, isPlayable: Bool) {
@@ -205,4 +224,20 @@ final class LibraryFolder {
     }
 
     var displayName: String { URL(fileURLWithPath: path).lastPathComponent }
+}
+
+/// A video the folder watcher found, waiting for the administrator to approve it.
+@Model
+final class PendingMedia {
+    @Attribute(.unique) var path: String
+    var dateFound: Date
+    /// The administrator chose not to add it; it isn't offered again.
+    var isIgnored = false
+
+    init(path: String) {
+        self.path = path
+        self.dateFound = .now
+    }
+
+    var fileName: String { URL(fileURLWithPath: path).lastPathComponent }
 }

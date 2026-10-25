@@ -1,0 +1,310 @@
+/*
+  Ultimate Theater — print and screen styles for the brochure and the user manual.
+  Near-black theater backdrop, soft pools of accent, blue, and purple, and translucent
+  "Liquid Glass" panels, after the app's AppBackground and glass controls.
+*/
+
+:root {
+  --bg: #0A0A0F;
+  --accent: #FF3D5A;
+  --accent-2: #FF8A3D;
+  --blue: #3B5BFF;
+  --purple: #8A4DFF;
+  --gold: #F5C451;
+  --text: rgba(255, 255, 255, 0.88);
+  --muted: rgba(255, 255, 255, 0.62);
+  --faint: rgba(255, 255, 255, 0.42);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-strong: rgba(255, 255, 255, 0.10);
+  --hairline: rgba(255, 255, 255, 0.13);
+  --font: system-ui, -apple-system, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  background: var(--bg);
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: #FF7088; text-decoration: none; }
+strong { color: #fff; font-weight: 650; }
+code { font-family: var(--mono); font-size: 0.88em; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1); border-radius: 5px; padding: 0.05em 0.35em; color: #fff; }
+pre { background: var(--glass); border: 1px solid var(--hairline); border-radius: 14px; padding: 12px 16px; overflow: hidden; }
+pre code { background: none; border: 0; padding: 0; white-space: pre-wrap; }
+
+/* ---------- Brand ---------- */
+
+.brandmark {
+  display: inline-flex; align-items: center; gap: 0.45em;
+  font-size: 15px; letter-spacing: 0.2em; color: #fff; font-weight: 300; white-space: nowrap;
+}
+.brandmark b { font-weight: 900; }
+.brandmark .mark {
+  width: 1.55em; height: 1.2em; border-radius: 0.28em; position: relative; flex: none;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+.brandmark .mark::after {
+  content: ""; position: absolute; left: 38%; top: 24%; width: 30%; height: 52%;
+  background: #fff; clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+.brandmark.big { font-size: 22px; }
+
+.condensed { font-stretch: condensed; }
+.accent { color: var(--accent); }
+.gold { color: var(--gold); }
+.gradient-text {
+  background: linear-gradient(90deg, var(--accent) 0%, #FF6A6A 45%, var(--accent-2) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* ---------- Glass ---------- */
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--hairline);
+  border-radius: 24px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 20px 50px rgba(0,0,0,0.35);
+}
+@media screen {
+  .glass { -webkit-backdrop-filter: blur(24px) saturate(140%); backdrop-filter: blur(24px) saturate(140%); }
+}
+.glass-frame {
+  margin: 0; padding: 0; border-radius: 18px; overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 30px 70px rgba(0,0,0,0.6), 0 0 0 6px rgba(255,255,255,0.03);
+}
+.glass-frame img { display: block; width: 100%; }
+
+.chip {
+  display: inline-block; padding: 4px 11px; border-radius: 999px;
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14);
+  font-size: 10.5px; font-weight: 650; color: #fff; letter-spacing: 0.01em; white-space: nowrap;
+}
+.chip.accent { background: rgba(255,61,90,0.18); border-color: rgba(255,61,90,0.45); }
+.chip.gold { background: rgba(245,196,81,0.14); border-color: rgba(245,196,81,0.45); color: var(--gold); }
+
+.eyebrow {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent);
+}
+
+/* =====================================================================
+   Brochure: fixed Letter pages, each with its own full-bleed backdrop.
+   ===================================================================== */
+
+body.brochure { background: #050507; }
+@page brochure { size: Letter; margin: 0; }
+
+.brochure .page {
+  page: brochure;
+  width: 8.5in; height: 11in; position: relative; overflow: hidden;
+  break-after: page; page-break-after: always;
+  padding: 0.62in 0.66in 0.55in;
+  background:
+    radial-gradient(ellipse 60% 45% at 96% 2%, rgba(255,61,90,0.30), transparent 70%),
+    radial-gradient(ellipse 65% 50% at 0% 100%, rgba(59,91,255,0.24), transparent 70%),
+    radial-gradient(ellipse 60% 40% at 50% 55%, rgba(138,77,255,0.10), transparent 70%),
+    var(--bg);
+  display: flex; flex-direction: column;
+}
+.brochure .page:last-child { break-after: auto; page-break-after: auto; }
+@media screen {
+  body.brochure { padding: 24px 0; }
+  .brochure .page { margin: 0 auto 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+}
+
+.brochure .page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.32in; }
+.brochure .page-head .folio { font-size: 9px; font-weight: 700; letter-spacing: 0.22em; color: var(--faint); text-transform: uppercase; }
+.brochure .page-foot {
+  margin-top: auto; display: flex; justify-content: space-between; align-items: center;
+  font-size: 8.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); font-weight: 600;
+  padding-top: 0.14in; border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.brochure h1, .brochure h2, .brochure h3 { color: #fff; margin: 0; }
+.brochure h2 {
+  font-size: 46px; line-height: 0.98; font-weight: 900; font-stretch: condensed; letter-spacing: -0.01em;
+}
+.brochure .lede { font-size: 13.5px; line-height: 1.55; color: var(--muted); margin: 12px 0 0; max-width: 5.6in; }
+.brochure h3 { font-size: 15px; font-weight: 750; margin-bottom: 5px; letter-spacing: -0.005em; }
+.brochure p { font-size: 10.5px; line-height: 1.5; color: var(--muted); margin: 0; }
+
+.brochure .feature { padding: 15px 17px 16px; border-radius: 20px; }
+.brochure .feature .icon {
+  width: 30px; height: 30px; border-radius: 9px; margin-bottom: 9px; display: grid; place-items: center;
+  background: linear-gradient(135deg, rgba(255,61,90,0.9), rgba(255,138,61,0.85));
+  box-shadow: 0 6px 16px rgba(255,61,90,0.35);
+}
+.brochure .feature .icon.blue { background: linear-gradient(135deg, #4F7CFF, var(--blue)); box-shadow: 0 6px 16px rgba(59,91,255,0.35); }
+.brochure .feature .icon.purple { background: linear-gradient(135deg, #A877FF, var(--purple)); box-shadow: 0 6px 16px rgba(138,77,255,0.35); }
+.brochure .feature .icon.gold { background: linear-gradient(135deg, #FFD97A, #E9A92A); box-shadow: 0 6px 16px rgba(245,196,81,0.3); }
+.brochure .feature .icon.green { background: linear-gradient(135deg, #3BD49B, #1FB89A); box-shadow: 0 6px 16px rgba(31,184,154,0.3); }
+.brochure .feature .icon svg { width: 17px; height: 17px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+.brochure .grid { display: grid; gap: 12px; }
+.brochure .cols-2 { grid-template-columns: 1fr 1fr; }
+.brochure .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+.brochure .shot { margin: 0; }
+.brochure .shot figcaption { font-size: 9px; color: var(--faint); margin-top: 7px; letter-spacing: 0.02em; }
+.brochure .shot-cap { font-size: 9px; color: var(--faint); margin-top: 7px; }
+
+.brochure .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+
+.brochure .stat { padding: 12px 14px; border-radius: 18px; }
+.brochure .stat .n { font-size: 30px; font-weight: 900; font-stretch: condensed; color: #fff; line-height: 1; }
+.brochure .stat .l { font-size: 9.5px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+
+.brochure ul.ticks { list-style: none; margin: 6px 0 0; padding: 0; }
+.brochure ul.ticks li { position: relative; padding-left: 15px; font-size: 10.5px; line-height: 1.45; color: var(--muted); margin: 3px 0; }
+.brochure ul.ticks li::before {
+  content: ""; position: absolute; left: 0; top: 0.5em; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+.brochure ul.ticks.gold li::before { background: var(--gold); }
+
+.brochure .fineprint { font-size: 7.4px; line-height: 1.45; color: rgba(255,255,255,0.5); }
+.brochure .fineprint p { font-size: 7.4px; line-height: 1.45; color: rgba(255,255,255,0.5); margin: 0 0 4px; }
+.brochure .fineprint strong { color: rgba(255,255,255,0.75); }
+
+/* =====================================================================
+   Manual: continuous flow on Letter pages.
+   ===================================================================== */
+
+body.manual { font-size: 10.4pt; line-height: 1.55; }
+
+.manual .page-glow {
+  position: fixed; left: 0; top: 0; width: 8.5in; height: 11in; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(ellipse 55% 30% at 100% 0%, rgba(255,61,90,0.20), transparent 70%),
+    radial-gradient(ellipse 45% 35% at 0% 62%, rgba(59,91,255,0.13), transparent 70%),
+    radial-gradient(ellipse 50% 30% at 70% 85%, rgba(138,77,255,0.07), transparent 70%);
+}
+@media screen {
+  .manual .page-glow { width: 100vw; height: 100vh; }
+  .manual .cover-page, .manual .flow { max-width: 8.5in; margin: 0 auto; }
+}
+
+.manual .cover-page {
+  height: 11in; position: relative; overflow: hidden;
+  padding: 0.75in 0.8in 0.6in;
+  break-after: page; page-break-after: always;
+  display: flex; flex-direction: column;
+  background:
+    radial-gradient(ellipse 70% 45% at 100% 0%, rgba(255,61,90,0.34), transparent 70%),
+    radial-gradient(ellipse 70% 50% at 0% 100%, rgba(59,91,255,0.26), transparent 70%),
+    radial-gradient(ellipse 60% 40% at 50% 60%, rgba(138,77,255,0.12), transparent 70%),
+    var(--bg);
+}
+.manual .cover-top { display: flex; align-items: center; gap: 16px; }
+.manual .app-icon { width: 68px; height: 68px; filter: drop-shadow(0 10px 24px rgba(255,61,90,0.45)); }
+.manual .cover-title {
+  font-size: 80px; line-height: 0.95; font-weight: 900; font-stretch: condensed; color: #fff;
+  margin: 0.45in 0 0; letter-spacing: -0.01em;
+}
+.manual .cover-tag { font-size: 22px; font-weight: 600; color: #fff; margin: 10px 0 0; }
+.manual .cover-tag strong { font-weight: 600; }
+.manual .cover-meta { font-size: 11pt; color: var(--muted); margin: 6px 0 0; }
+.manual .cover-shot { margin: 0.36in auto 0; width: 6.1in; }
+.manual .cover-lede { font-size: 10.5pt; line-height: 1.55; color: var(--muted); margin: 0.3in 0 0.2in; max-width: 6.6in; }
+.manual .cover-foot { margin-top: auto; font-size: 8pt; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+
+.manual .flow {
+  padding: 0.62in 0.8in 0.3in;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+
+.manual .chapter { break-before: page; page-break-before: always; }
+.manual .chapter-head { display: flex; align-items: baseline; gap: 14px; margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.manual .chapter-head .num { font-size: 15px; font-weight: 800; color: var(--accent); letter-spacing: 0.08em; }
+.manual h2 { font-size: 34pt; line-height: 1; font-weight: 900; font-stretch: condensed; color: #fff; margin: 0; letter-spacing: -0.01em; }
+.manual h3 {
+  font-size: 15pt; font-weight: 750; color: #fff; margin: 24px 0 8px; letter-spacing: -0.005em;
+  break-after: avoid; page-break-after: avoid;
+}
+.manual h3::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 9px; vertical-align: 0.18em; }
+.manual h4 { font-size: 11.5pt; color: #fff; margin: 16px 0 6px; break-after: avoid; }
+.manual p { margin: 0 0 9px; orphans: 3; widows: 3; }
+.manual ul, .manual ol { margin: 0 0 10px; padding-left: 1.3em; }
+.manual li { margin: 3px 0; }
+.manual li::marker { color: var(--accent); font-weight: 700; }
+.manual li > ul, .manual li > ol { margin: 3px 0 2px; }
+
+.manual table {
+  width: 100%; border-collapse: separate; border-spacing: 0; margin: 8px 0 14px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.11); border-radius: 14px; overflow: hidden;
+  font-size: 9.4pt; line-height: 1.45; break-inside: avoid; page-break-inside: avoid;
+}
+.manual th {
+  text-align: left; font-size: 7.8pt; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(255,255,255,0.6); background: rgba(255,255,255,0.05); padding: 8px 12px;
+}
+.manual td { padding: 7px 12px; border-top: 1px solid rgba(255,255,255,0.07); vertical-align: top; }
+.manual td:first-child { color: #fff; }
+.manual table.keys td:first-child { white-space: nowrap; width: 1%; }
+.manual kbd {
+  display: inline-block; min-width: 1.9em; text-align: center; padding: 1px 7px; margin: 1px 0;
+  font: 650 9pt var(--font); color: #fff;
+  background: linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0.08));
+  border: 1px solid rgba(255,255,255,0.22); border-bottom-width: 2px; border-radius: 6px;
+}
+.manual .sep { color: var(--faint); margin: 0 5px; }
+
+.manual figure.shot { margin: 12px auto 16px; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+.manual figure.shot img {
+  display: block; margin: 0 auto; max-width: 100%; border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 18px 44px rgba(0,0,0,0.55);
+}
+.manual figure.shot.wide img { width: 5.3in; }
+.manual figure.shot.medium img { width: 4.3in; }
+.manual figure.shot.narrow img { width: 2.6in; }
+.manual figcaption { font-size: 8.4pt; color: var(--faint); margin-top: 7px; letter-spacing: 0.02em; }
+
+.manual .faq {
+  background: var(--glass); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px;
+  padding: 10px 14px 4px; margin: 0 0 9px; break-inside: avoid; page-break-inside: avoid;
+}
+.manual .faq .q { color: #fff; font-weight: 700; margin-bottom: 3px; }
+
+.manual .toc-page .chapter-head { margin-bottom: 14px; }
+.manual ol.toc { list-style: none; padding: 0; margin: 0; }
+.manual ol.toc > li {
+  margin: 0 0 5px; padding: 6px 14px 6px; border-radius: 14px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09);
+  break-inside: avoid;
+}
+.manual ol.toc > li > a { display: flex; align-items: baseline; gap: 12px; color: #fff; }
+.manual ol.toc .num { font-weight: 800; color: var(--accent); font-size: 11pt; width: 1.6em; }
+.manual ol.toc .t { font-size: 13pt; font-weight: 800; font-stretch: condensed; }
+.manual ol.toc .subs { display: block; margin: 1px 0 0 2.45em; font-size: 7.9pt; line-height: 1.4; color: var(--faint); }
+.manual ol.toc .subs a { color: var(--muted); }
+
+/* Chrome rasterizes blurred shadows into opaque tiles in PDFs, which show as dark
+   rectangles on the gradient backdrop; print uses borders and soft glows instead. */
+@media print {
+  .glass, .glass-frame, .manual figure.shot img, .brochure .feature .icon { box-shadow: none !important; }
+  .glass-frame { outline: 1px solid rgba(255,255,255,0.05); outline-offset: 4px; }
+}
+
+/* Brochure layout refinements: nothing on a page shrinks to fit; feature cards put the
+   icon beside the heading to save height. */
+.brochure .page > * { flex-shrink: 0; }
+.brochure .feature { display: grid; grid-template-columns: 28px 1fr; column-gap: 10px; align-items: center; padding: 12px 14px 13px; }
+.brochure .feature .icon { width: 28px; height: 28px; margin: 0; border-radius: 8px; }
+.brochure .feature .icon svg { width: 16px; height: 16px; }
+.brochure .feature h3 { margin: 0; font-size: 13px; line-height: 1.2; }
+.brochure .feature p { grid-column: 1 / -1; margin-top: 7px; font-size: 10px; }
+@media print {
+  .gradient-text { background: none; color: var(--accent); }
+}
+.manual p.logo img { height: 12px; display: block; margin: 2px 0 2px; }

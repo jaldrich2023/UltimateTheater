@@ -559,18 +559,38 @@ struct TheaterEngineTests {
 // MARK: - Live playback
 
 @MainActor
-@Suite(.serialized)
+@Suite(.serialized, .tags(.realtime), .realtimeOnly)
 struct TheaterPlaybackTests {
+    /// An engine whose sound is muted, so running these tests doesn't play tones out loud.
+    /// The audio renderer still drives the media clock, which is what the tests measure.
+    private static func silentEngine() -> TheaterEngine {
+        let engine = TheaterEngine()
+        engine.volume = 0
+        engine.isMuted = true
+        return engine
+    }
+
+    /// Waits for the media clock to reach `mark`, then checks it got there at roughly real
+    /// speed: not running ahead of the wall clock, and not stalled. Polls rather than sleeping
+    /// for a fixed time, so a slow machine only makes the test take longer.
+    private func expectRealTimePlayback(_ engine: TheaterEngine, from start: ContinuousClock.Instant,
+                                        reaching mark: Double = 1.0) async throws {
+        let reached = try await waitUntil(timeout: .seconds(6)) { engine.currentTime >= mark }
+        let elapsed = start.duration(to: .now) / .seconds(1)
+        #expect(reached, "clock stuck at \(engine.currentTime)s")
+        #expect(elapsed >= mark * 0.7, "media clock ran ahead: \(mark)s of media in \(elapsed)s")
+    }
+
     @Test func enginePlaysMP4InRealTime() async throws {
         let url = try await MovieFixture.write(.mp4, seconds: 3)
         defer { try? FileManager.default.removeItem(at: url) }
-        let engine = TheaterEngine()
+        let engine = Self.silentEngine()
+        defer { engine.shutdown() }
         await engine.load(url, start: 0, selection: nil)
+        let started = ContinuousClock.now
         #expect(engine.failure == nil, "\(engine.failure ?? "")")
         #expect(engine.isPlaying)
-        try await Task.sleep(for: .milliseconds(1200))
-        #expect(engine.currentTime > 0.8 && engine.currentTime < 1.6, "clock at \(engine.currentTime)")
-        engine.shutdown()
+        try await expectRealTimePlayback(engine, from: started)
     }
 
     @Test func enginePlaysMatroskaInRealTime() async throws {
@@ -578,8 +598,10 @@ struct TheaterPlaybackTests {
         let url = try TestMKVWriter.write(media, subtitles: [(0.1, 2.5, "Forced line")])
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let engine = TheaterEngine()
+        let engine = Self.silentEngine()
+        defer { engine.shutdown() }
         await engine.load(url, start: 0, selection: nil)
+        let started = ContinuousClock.now
         #expect(engine.failure == nil)
         #expect(engine.hasStarted)
         #expect(engine.isPlaying)
@@ -590,45 +612,15 @@ struct TheaterPlaybackTests {
         #expect(engine.selectedSubtitleID == nil)
         engine.selectSubtitle(engine.trackList.subtitles.first?.id)
 
-        try await Task.sleep(for: .milliseconds(1200))
-        #expect(engine.currentTime > 0.8 && engine.currentTime < 1.6, "clock advanced \(engine.currentTime)s")
-        #expect(engine.subtitleText == "Forced line")
+        try await expectRealTimePlayback(engine, from: started)
+        #expect(try await waitUntil(timeout: .seconds(2)) { engine.subtitleText == "Forced line" },
+                "subtitle: \(engine.subtitleText ?? "none")")
 
         engine.seek(to: 2.2)
-        try await Task.sleep(for: .milliseconds(400))
-        #expect(engine.currentTime >= 2.0, "seeked to \(engine.currentTime)s")
+        #expect(try await waitUntil(timeout: .seconds(3)) { engine.currentTime >= 2.0 }, "seeked to \(engine.currentTime)s")
 
-        try await Task.sleep(for: .milliseconds(1500))
-        #expect(!engine.isPlaying, "stops at end of file")
+        #expect(try await waitUntil(timeout: .seconds(5)) { !engine.isPlaying }, "stops at end of file")
         #expect(engine.failure == nil, "\(engine.failure ?? "")")
-        engine.shutdown()
-    }
-}
-
-// MARK: - Thumbnails
-
-@Suite(.serialized)
-struct ThumbnailTests {
-    @Test func theaterThumbnailsDecodeAKeyframe() async throws {
-        let media = try await Fixtures.encode(frames: 90)
-        let url = try TestMKVWriter.write(media)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let generator = ThumbnailGenerator(url: url, maximumWidth: 80)
-        let image = try #require(await generator.image(at: 1.2))
-        #expect(image.width == 80)
-        #expect(image.height == 60) // Keeps the 4:3 aspect ratio.
-        // Cached by 5-second bucket.
-        let again = await generator.image(at: 2.5)
-        #expect(again === image)
-    }
-
-    @Test func aviThumbnailsUseAnnexBParameterSets() async throws {
-        let media = try await Fixtures.encode()
-        let url = try TestAVIWriter.write(media)
-        defer { try? FileManager.default.removeItem(at: url) }
-        let image = await ThumbnailGenerator(url: url, maximumWidth: 80).image(at: 0)
-        #expect(image != nil)
     }
 }
 
@@ -682,22 +674,17 @@ nonisolated enum MovieFixture {
         let url = Fixtures.temporaryURL(fileType == .mov ? "mov" : "mp4")
         let writer = try AVAssetWriter(outputURL: url, fileType: fileType)
         writer.shouldOptimizeForNetworkUse = fastStart // Index before the media data.
-        let video = AVAssetWriterInput(mediaType: .video, outputSettings: [
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [AVVideoAllowFrameReorderingKey: true, AVVideoMaxKeyFrameIntervalKey: 15],
         ])
-        video.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: video, sourcePixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-        ])
-        let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 96000,
         ])
-        audio.expectsMediaDataInRealTime = false
-        writer.add(video)
-        writer.add(audio)
-        guard writer.startWriting() else { throw writer.error ?? MediaFormatError.coreMedia(-1) }
+        // Inputs default to offline (not real-time) processing, which is what a fixture wants.
+        let video = writer.inputPixelBufferReceiver(for: videoInput, pixelBufferAttributes: nil)
+        let audio = writer.inputReceiver(for: audioInput)
+        try writer.start()
         writer.startSession(atSourceTime: .zero)
 
         let rate = 44100.0
@@ -710,35 +697,55 @@ nonisolated enum MovieFixture {
                                        magicCookie: nil, extensions: nil, formatDescriptionOut: &audioFormat)
         guard let audioFormat else { throw MediaFormatError.coreMedia(-3) }
 
+        /// 1024 frames of a 440 Hz tone starting at `frame`.
+        func audioSample(at frame: Int) -> CMSampleBuffer? {
+            let count = 1024
+            var samples = [Float](repeating: 0, count: count * 2)
+            for i in 0..<count {
+                let value = sinf(Float(frame + i) * 2 * .pi * 440 / Float(rate)) * 0.3
+                samples[i * 2] = value
+                samples[i * 2 + 1] = value
+            }
+            let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+            var block: CMBlockBuffer?
+            CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil,
+                                               customBlockSource: nil, offsetToData: 0, dataLength: data.count,
+                                               flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+            guard let block else { return nil }
+            let copied = data.withUnsafeBytes {
+                CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count)
+            }
+            guard copied == kCMBlockBufferNoErr else { return nil }
+            var sample: CMSampleBuffer?
+            CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+                allocator: nil, dataBuffer: block, formatDescription: audioFormat, sampleCount: count,
+                presentationTimeStamp: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(rate)),
+                packetDescriptions: nil, sampleBufferOut: &sample)
+            return sample
+        }
+
+        /// A frame of solid colour for video frame `index`.
+        func videoFrame(_ index: Int) -> CVPixelBuffer? {
+            var buffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &buffer)
+            guard let buffer else { return nil }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer) { memset(base, Int32(index * 7 % 255), CVPixelBufferGetDataSize(buffer)) }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            return buffer
+        }
+
         /// Feeds audio up to `time`. Mid-movie it yields to video when the writer wants that
         /// first (waiting would deadlock); at the end it waits for the writer.
         func appendAudio(until time: Double, frame: inout Int, waits: Bool = false) async throws {
             while Double(frame) / rate < min(time, seconds) {
-                while !audio.isReadyForMoreMediaData {
-                    guard waits else { return }
-                    try await Task.sleep(for: .milliseconds(2))
+                guard let sample = audioSample(at: frame) else { return }
+                if waits {
+                    try await audio.append(CMReadySampleBuffer(unsafeBuffer: sample))
+                } else if try !audio.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sample)) {
+                    return // Not ready; the same samples are rebuilt on the next call.
                 }
-                let count = 1024
-                var samples = [Float](repeating: 0, count: count * 2)
-                for i in 0..<count {
-                    let value = sinf(Float(frame + i) * 2 * .pi * 440 / Float(rate)) * 0.3
-                    samples[i * 2] = value
-                    samples[i * 2 + 1] = value
-                }
-                let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
-                var block: CMBlockBuffer?
-                CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil,
-                                                   customBlockSource: nil, offsetToData: 0, dataLength: data.count,
-                                                   flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
-                guard let block else { return }
-                data.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count) }
-                var sample: CMSampleBuffer?
-                CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-                    allocator: nil, dataBuffer: block, formatDescription: audioFormat, sampleCount: count,
-                    presentationTimeStamp: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(rate)),
-                    packetDescriptions: nil, sampleBufferOut: &sample)
-                if let sample { audio.append(sample) }
-                frame += count
+                frame += 1024
             }
         }
 
@@ -747,25 +754,20 @@ nonisolated enum MovieFixture {
         var audioFrame = 0
         for index in 0..<Int(seconds * 30) {
             try await appendAudio(until: Double(index) / 30 + 0.5, frame: &audioFrame)
-            while !video.isReadyForMoreMediaData {
-                if audio.isReadyForMoreMediaData, Double(audioFrame) / rate < seconds {
+            let time = CMTime(value: CMTimeValue(index), timescale: 30)
+            while true {
+                guard let buffer = videoFrame(index) else { break }
+                if try video.appendImmediately(CVReadOnlyPixelBuffer(unsafeBuffer: buffer), with: time) { break }
+                let before = audioFrame
+                if Double(audioFrame) / rate < seconds {
                     try await appendAudio(until: Double(audioFrame + 1024) / rate, frame: &audioFrame)
-                } else {
-                    try await Task.sleep(for: .milliseconds(2))
                 }
+                if audioFrame == before { try await Task.sleep(for: .milliseconds(2)) }
             }
-            guard let pool = adaptor.pixelBufferPool else { break }
-            var buffer: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
-            guard let buffer else { continue }
-            CVPixelBufferLockBaseAddress(buffer, [])
-            if let base = CVPixelBufferGetBaseAddress(buffer) { memset(base, Int32(index * 7 % 255), CVPixelBufferGetDataSize(buffer)) }
-            CVPixelBufferUnlockBaseAddress(buffer, [])
-            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(index), timescale: 30))
         }
-        video.markAsFinished()
+        video.finish()
         try await appendAudio(until: seconds, frame: &audioFrame, waits: true)
-        audio.markAsFinished()
+        audio.finish()
         await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? MediaFormatError.coreMedia(-2) }
         return url

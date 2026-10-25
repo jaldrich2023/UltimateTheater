@@ -74,16 +74,22 @@ nonisolated enum MediaRepair {
         let source = try FileByteSource(url: url)
         let writer = try RepairWriter(url: output)
         defer { writer.close() }
+        let notes: [String]
         switch plan.kind {
         case .mp4MissingIndex: throw MediaRepairError.unsupported("a missing MP4 index needs a matching reference movie")
-        case .mp4Truncated: return try MP4Fixer.repair(source, url: url, writer: writer, progress: progress)
-        case .avi: return try AVIFixer.repair(source, writer: writer, progress: progress)
-        case .matroska: return try MatroskaFixer.repair(source, writer: writer, progress: progress)
-        case .transportStream(let size, let sync): return try TransportStreamFixer.repair(source, size: size, sync: sync, writer: writer, progress: progress)
-        case .programStream: return try ProgramStreamFixer.repair(source, writer: writer, progress: progress)
-        case .flv: return try FLVFixer.repair(source, writer: writer, progress: progress)
-        case .ogg: return try OggFixer.repair(source, writer: writer, progress: progress)
+        case .mp4Truncated: notes = try MP4Fixer.repair(source, url: url, writer: writer, progress: progress)
+        case .avi: notes = try AVIFixer.repair(source, writer: writer, progress: progress)
+        case .matroska: notes = try MatroskaFixer.repair(source, writer: writer, progress: progress)
+        case .transportStream(let size, let sync): notes = try TransportStreamFixer.repair(source, size: size, sync: sync, writer: writer, progress: progress)
+        case .programStream: notes = try ProgramStreamFixer.repair(source, writer: writer, progress: progress)
+        case .flv: notes = try FLVFixer.repair(source, writer: writer, progress: progress)
+        case .ogg: notes = try OggFixer.repair(source, writer: writer, progress: progress)
         }
+        // The last buffered bytes are written (and on disk) before the copy can replace
+        // anything: a failed final write (a full disk, say) must fail the repair, not leave a
+        // short copy that looks finished.
+        try writer.finish()
+        return notes
     }
 
     static func describe(bytes: UInt64) -> String {
@@ -93,22 +99,133 @@ nonisolated enum MediaRepair {
 
 // MARK: - Output
 
+/// Where a repaired copy goes. It's written to a fresh temporary file on the destination's
+/// volume, and only takes the destination's place once it's complete: a cancelled or failed
+/// repair never leaves the destination missing or half-written, and a destination that is
+/// the damaged original (or another file the repair reads) is refused outright.
+nonisolated struct RepairOutput: Sendable {
+    enum Problem: LocalizedError, Equatable {
+        case sameAsSource
+        case destinationIsFolder
+
+        var errorDescription: String? {
+            switch self {
+            case .sameAsSource: "The repaired copy can't replace the file being repaired. Choose a different name or folder."
+            case .destinationIsFolder: "A folder already has that name. Choose a different name."
+            }
+        }
+    }
+
+    /// Where the finished copy goes.
+    let destination: URL
+    /// Where the repair writes while it runs.
+    let temporary: URL
+    /// Files that must never be replaced (the damaged original and any reference).
+    private let protected: [URL]
+    /// The private folder holding `temporary`, when one was made for it.
+    private let temporaryFolder: URL?
+
+    /// Checks the destination and picks a temporary file for the repair to write.
+    static func prepare(destination: URL, protecting sources: [URL]) throws -> RepairOutput {
+        let destination = destination.standardizedFileURL
+        try check(destination, against: sources)
+        let manager = FileManager.default
+        // A folder on the destination's volume, so finishing is a rename rather than a copy.
+        let folder = try? manager.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                      appropriateFor: destination.deletingLastPathComponent(), create: true)
+        let base = folder ?? manager.temporaryDirectory
+        let name = "Repairing \(UUID().uuidString)" + (destination.pathExtension.isEmpty ? "" : "." + destination.pathExtension)
+        return RepairOutput(destination: destination, temporary: base.appending(path: name),
+                            protected: sources, temporaryFolder: folder)
+    }
+
+    /// Whether two URLs name the same file: the same path once symbolic links are resolved,
+    /// or the same file system item (hard links, differently-cased paths, aliases of a volume).
+    static func isSameFile(_ a: URL, _ b: URL) -> Bool {
+        let first = a.standardizedFileURL.resolvingSymlinksInPath()
+        let second = b.standardizedFileURL.resolvingSymlinksInPath()
+        if first.path == second.path { return true }
+        guard let one = identity(first), let two = identity(second) else { return false }
+        return one.isEqual(two)
+    }
+
+    private static func identity(_ url: URL) -> NSObject? {
+        // A fresh URL, so no cached value from an earlier look is returned.
+        (try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.fileResourceIdentifierKey]))?
+            .fileResourceIdentifier as? NSObject
+    }
+
+    private static func check(_ destination: URL, against sources: [URL]) throws {
+        if sources.contains(where: { isSameFile(destination, $0) }) { throw Problem.sameAsSource }
+        var isFolder: ObjCBool = false
+        if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isFolder), isFolder.boolValue {
+            throw Problem.destinationIsFolder
+        }
+    }
+
+    /// Puts the finished copy at the destination, replacing what was there only now. Returns
+    /// where the copy ended up. On failure the destination is as it was; call `discard()`.
+    func commit() throws -> URL {
+        try Self.check(destination, against: protected) // Checked again: the destination may have changed meanwhile.
+        let manager = FileManager.default
+        defer { removeTemporaryFolder() }
+        if (try? destination.checkResourceIsReachable()) == true {
+            let result = try manager.replaceItemAt(destination, withItemAt: temporary, backupItemName: nil, options: [])
+            return result ?? destination
+        }
+        // Nothing there yet. A move never overwrites, so a file that appeared meanwhile stays.
+        try manager.moveItem(at: temporary, to: destination)
+        return destination
+    }
+
+    /// Deletes the temporary file of a cancelled or failed repair. Never touches the destination.
+    func discard() {
+        try? FileManager.default.removeItem(at: temporary)
+        removeTemporaryFolder()
+    }
+
+    private func removeTemporaryFolder() {
+        // Only the private folder made for this repair, and only once it's empty.
+        guard let temporaryFolder,
+              (try? FileManager.default.contentsOfDirectory(atPath: temporaryFolder.path))?.isEmpty == true else { return }
+        try? FileManager.default.removeItem(at: temporaryFolder)
+    }
+
+    /// Creates a new, empty file for writing. Fails (rather than truncating or replacing it)
+    /// when anything already exists at `url`.
+    static func createNewFile(at url: URL) throws -> FileHandle {
+        let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+        }
+        guard descriptor >= 0 else {
+            let code = errno
+            if code == EEXIST { throw CocoaError(.fileWriteFileExists, userInfo: [NSURLErrorKey: url]) }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSURLErrorKey: url])
+        }
+        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    }
+}
+
 /// Buffered output with random-access patches.
 nonisolated final class RepairWriter {
     private let handle: FileHandle
     private var buffer = Data()
     private(set) var position: UInt64 = 0
 
+    /// Writes a new file at `url`; anything already there is left alone and the init fails.
+    /// (Repairs write to a `RepairOutput.temporary` file and replace the destination at the end.)
     init(url: URL) throws {
-        try? FileManager.default.removeItem(at: url)
-        guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw CocoaError(.fileWriteNoPermission) }
-        handle = try FileHandle(forWritingTo: url)
+        handle = try RepairOutput.createNewFile(at: url)
     }
 
     func write(_ data: Data) throws {
         buffer.append(data)
         position += UInt64(data.count)
-        if buffer.count >= 8 << 20 { try flush() }
+        if buffer.count >= 8 << 20 {
+            try Task.checkCancellation() // A cancelled repair stops within the next 8 MB.
+            try flush()
+        }
     }
 
     func write(_ bytes: [UInt8]) throws { try write(Data(bytes)) }
@@ -140,6 +257,12 @@ nonisolated final class RepairWriter {
         buffer.removeAll(keepingCapacity: true)
     }
 
+    /// Writes what's buffered and makes sure it reached the disk. Throws when it didn't.
+    func finish() throws {
+        try flush()
+        try handle.synchronize()
+    }
+
     func close() {
         try? flush()
         try? handle.close()
@@ -158,6 +281,11 @@ nonisolated enum MP4Fixer {
         let offset: UInt64
         let headerLength: UInt64
         let declaredSize: UInt64
+        /// Where the box claims to end (saturating, since damaged sizes can be anything).
+        var end: UInt64 {
+            let (value, overflow) = offset.addingReportingOverflow(declaredSize)
+            return overflow ? .max : value
+        }
     }
 
     static func topBoxes(_ source: FileByteSource) throws -> [TopBox] {
@@ -171,6 +299,7 @@ nonisolated enum MP4Fixer {
             if size == 0 { size = source.size - offset }
             guard size >= headerLength else { break }
             boxes.append(TopBox(type: String(decoding: header[4..<8], as: UTF8.self), offset: offset, headerLength: headerLength, declaredSize: size))
+            guard size < source.size - offset else { break } // Runs to (or past) the end of the file.
             offset += size
         }
         return boxes
@@ -184,12 +313,12 @@ nonisolated enum MP4Fixer {
                 "The index that describes the video and audio is missing, usually because a copy or encode was interrupted.",
             ], fileExtension: ext)
         }
-        guard moov.offset + moov.declaredSize <= source.size else { return nil } // A cut-off index can't be trusted.
+        guard moov.end <= source.size else { return nil } // A cut-off index can't be trusted.
         let tracks = try trackTables(source, moov: moov)
         let missing = tracks.reduce(0) { $0 + ($1.samples.count - $1.keptCount(fileSize: source.size)) }
-        let cut = boxes.last.map { $0.offset + $0.declaredSize > source.size } ?? false
+        let cut = boxes.last.map { $0.end > source.size } ?? false
         guard missing > 0 || cut else { return nil }
-        var findings = ["The file was cut off before the end (\(MediaRepair.describe(bytes: source.size)) of \(MediaRepair.describe(bytes: (boxes.last.map { $0.offset + $0.declaredSize }) ?? source.size)) present)."]
+        var findings = ["The file was cut off before the end (\(MediaRepair.describe(bytes: source.size)) of \(MediaRepair.describe(bytes: (boxes.last.map(\.end)) ?? source.size)) present)."]
         if missing > 0 { findings.append("\(missing.formatted()) video and audio samples listed in the index are missing, so playback stops or fails near the end.") }
         return RepairPlan(kind: .mp4Truncated, format: "MP4", findings: findings, fileExtension: ext)
     }
@@ -208,7 +337,10 @@ nonisolated enum MP4Fixer {
         var syncSamples: Set<UInt32>?
 
         func keptCount(fileSize: UInt64) -> Int {
-            samples.firstIndex { $0.offset + UInt64($0.size) > fileSize } ?? samples.count
+            samples.firstIndex { sample in
+                let (end, overflow) = sample.offset.addingReportingOverflow(UInt64(sample.size))
+                return overflow || end > fileSize
+            } ?? samples.count
         }
     }
 
@@ -221,56 +353,91 @@ nonisolated enum MP4Fixer {
         return current
     }
 
-    private static func u32(_ d: Data, _ at: Int) -> UInt32 { UInt32(d[(d.startIndex + at)..<(d.startIndex + at + 4)].bigEndianUInt) }
-    private static func u64(_ d: Data, _ at: Int) -> UInt64 { UInt64(d[(d.startIndex + at)..<(d.startIndex + at + 8)].bigEndianUInt) }
+    /// Big-endian reads relative to the data's start; reads past the end give zero.
+    private static func u32(_ d: Data, _ at: Int) -> UInt32 {
+        guard at >= 0, at <= d.count - 4 else { return 0 }
+        return UInt32(d[(d.startIndex + at)..<(d.startIndex + at + 4)].bigEndianUInt)
+    }
+    private static func u64(_ d: Data, _ at: Int) -> UInt64 {
+        guard at >= 0, at <= d.count - 8 else { return 0 }
+        return d[(d.startIndex + at)..<(d.startIndex + at + 8)].bigEndianUInt
+    }
+
+    /// A table's entry count, limited to the entries its box actually holds.
+    private static func entryCount(_ d: Data, at offset: Int = 4, header: Int = 8, entrySize: Int) -> Int {
+        min(Int(u32(d, offset)), max(d.count - header, 0) / entrySize)
+    }
+
+    /// Most samples one track may list; more come from damage (and would exhaust memory).
+    static let maxSamplesPerTrack = MP4Demuxer.maxSamplesPerTrack
+
+    /// Duration in whole ticks; non-finite or out-of-range values saturate rather than trap.
+    private static func ticks(_ value: Double) -> UInt64 {
+        guard value.isFinite, value > 0 else { return 0 }
+        return value >= 1.8e19 ? .max : UInt64(value.rounded())
+    }
 
     static func trackTables(_ source: FileByteSource, moov: TopBox) throws -> [TrackTables] {
-        let data = try source.read(at: moov.offset + moov.headerLength, count: Int(moov.declaredSize - moov.headerLength))
+        let data = try source.read(at: moov.offset + moov.headerLength, count: Int(clamping: moov.declaredSize - moov.headerLength),
+                                   limit: FileByteSource.maxIndexSize)
         return MP4Boxes.children(of: data).filter { $0.type == "trak" }.compactMap { trak in
-            boxBody(trak.body, ["mdia", "minf", "stbl"]).flatMap(tables(fromSampleTable:))
+            boxBody(trak.body, ["mdia", "minf", "stbl"]).flatMap { tables(fromSampleTable: $0, fileSize: source.size) }
         }
     }
 
-    static func tables(fromSampleTable stbl: Data) -> TrackTables? {
+    /// The sample tables of one track. A uniform sample size can't describe more samples than
+    /// `fileSize` holds bytes for.
+    static func tables(fromSampleTable stbl: Data, fileSize: UInt64 = .max) -> TrackTables? {
         guard let stsz = MP4Boxes.child("stsz", of: stbl), let stsc = MP4Boxes.child("stsc", of: stbl),
               let stts = MP4Boxes.child("stts", of: stbl) else { return nil }
         var chunkOffsets: [UInt64] = []
+        // Every count is limited to the entries its box holds, so damaged counts can't
+        // allocate or loop beyond the index's own size.
         if let co = MP4Boxes.child("stco", of: stbl) {
-            chunkOffsets = (0..<Int(u32(co, 4))).map { UInt64(u32(co, 8 + $0 * 4)) }
+            chunkOffsets = (0..<entryCount(co, entrySize: 4)).map { UInt64(u32(co, 8 + $0 * 4)) }
         } else if let co = MP4Boxes.child("co64", of: stbl) {
-            chunkOffsets = (0..<Int(u32(co, 4))).map { u64(co, 8 + $0 * 8) }
+            chunkOffsets = (0..<entryCount(co, entrySize: 8)).map { u64(co, 8 + $0 * 8) }
         } else { return nil }
         let uniform = u32(stsz, 4)
-        let count = Int(u32(stsz, 8))
-        let sizes: [UInt32] = uniform != 0 ? Array(repeating: uniform, count: count) : (0..<count).map { u32(stsz, 12 + $0 * 4) }
-        let entries = (0..<Int(u32(stsc, 4))).map { (first: Int(u32(stsc, 8 + $0 * 12)), perChunk: Int(u32(stsc, 12 + $0 * 12)), description: u32(stsc, 16 + $0 * 12)) }
+        // A uniform size lists no entries; its count is limited only by the per-track cap.
+        let count = uniform != 0 ? min(Int(u32(stsz, 8)), maxSamplesPerTrack, Int(clamping: fileSize / UInt64(uniform)))
+            : min(entryCount(stsz, at: 8, header: 12, entrySize: 4), maxSamplesPerTrack)
+        func size(_ index: Int) -> UInt32 { uniform != 0 ? uniform : u32(stsz, 12 + index * 4) }
+        let entries = (0..<entryCount(stsc, entrySize: 12)).map {
+            (first: Int(u32(stsc, 8 + $0 * 12)), perChunk: Int(u32(stsc, 12 + $0 * 12)), description: u32(stsc, 16 + $0 * 12))
+        }
 
         var tables = TrackTables()
         var sampleIndex = 0
+        var entryIndex = -1
         for (chunk, chunkOffset) in chunkOffsets.enumerated() where sampleIndex < count {
             let chunkNumber = chunk + 1
-            guard let entry = entries.last(where: { $0.first <= chunkNumber }) else { continue }
+            // The entry whose first chunk is the latest at or before this one (entries ascend).
+            while entryIndex + 1 < entries.count, entries[entryIndex + 1].first <= chunkNumber { entryIndex += 1 }
+            guard entryIndex >= 0 else { continue }
+            let entry = entries[entryIndex]
             var offset = chunkOffset
-            for _ in 0..<entry.perChunk where sampleIndex < count {
-                tables.samples.append(Sample(offset: offset, size: sizes[sampleIndex], descriptionIndex: entry.description))
-                offset += UInt64(sizes[sampleIndex])
+            for _ in 0..<min(entry.perChunk, count - sampleIndex) {
+                let sampleSize = size(sampleIndex)
+                tables.samples.append(Sample(offset: offset, size: sampleSize, descriptionIndex: entry.description))
+                offset = offset &+ UInt64(sampleSize)
                 sampleIndex += 1
             }
         }
-        tables.durations = (0..<Int(u32(stts, 4))).map { (u32(stts, 8 + $0 * 8), u32(stts, 12 + $0 * 8)) }
+        tables.durations = (0..<entryCount(stts, entrySize: 8)).map { (u32(stts, 8 + $0 * 8), u32(stts, 12 + $0 * 8)) }
         if let ctts = MP4Boxes.child("ctts", of: stbl) {
             tables.cttsVersion = ctts.first ?? 0
-            tables.compositionOffsets = (0..<Int(u32(ctts, 4))).map { (u32(ctts, 8 + $0 * 8), u32(ctts, 12 + $0 * 8)) }
+            tables.compositionOffsets = (0..<entryCount(ctts, entrySize: 8)).map { (u32(ctts, 8 + $0 * 8), u32(ctts, 12 + $0 * 8)) }
         }
         if let stss = MP4Boxes.child("stss", of: stbl) {
-            tables.syncSamples = Set((0..<Int(u32(stss, 4))).map { u32(stss, 8 + $0 * 4) })
+            tables.syncSamples = Set((0..<entryCount(stss, entrySize: 4)).map { u32(stss, 8 + $0 * 4) })
         }
         return tables
     }
 
     /// Run-length entries truncated to the first `count` samples.
     private static func truncate<T>(_ runs: [(count: UInt32, value: T)], to count: Int) -> [(count: UInt32, value: T)] {
-        var left = UInt32(count)
+        var left = UInt32(clamping: count)
         var result: [(count: UInt32, value: T)] = []
         for run in runs where left > 0 {
             let take = min(run.count, left)
@@ -283,7 +450,9 @@ nonisolated enum MP4Fixer {
     static func repair(_ source: FileByteSource, url: URL, writer: RepairWriter, progress: (Double) -> Void) throws -> [String] {
         let boxes = try topBoxes(source)
         guard let moov = boxes.first(where: { $0.type == "moov" }) else { throw MediaRepairError.unsupported("the index is missing") }
-        let moovData = try source.read(at: moov.offset + moov.headerLength, count: Int(moov.declaredSize - moov.headerLength))
+        guard moov.end <= source.size else { throw MediaRepairError.unsupported("the index is cut off") }
+        let moovData = try source.read(at: moov.offset + moov.headerLength, count: Int(clamping: moov.declaredSize - moov.headerLength),
+                                       limit: FileByteSource.maxIndexSize)
 
         // Rebuild every track's sample tables with only the samples that are present.
         var movieTimescale: UInt32 = 1000
@@ -302,7 +471,9 @@ nonisolated enum MP4Fixer {
             dropped += removed
         }
         if var mvhd = MP4Boxes.child("mvhd", of: moovData) {
-            if (mvhd.first ?? 0) == 1 { mvhd.replaceSubrange((mvhd.startIndex + 24)..<(mvhd.startIndex + 32), with: be64(longest)) }
+            if mvhd.count < ((mvhd.first ?? 0) == 1 ? 32 : 20) {
+                // Too short to hold a duration (damage): left as it is.
+            } else if (mvhd.first ?? 0) == 1 { mvhd.replaceSubrange((mvhd.startIndex + 24)..<(mvhd.startIndex + 32), with: be64(longest)) }
             else { mvhd.replaceSubrange((mvhd.startIndex + 16)..<(mvhd.startIndex + 20), with: be32(UInt32(min(longest, UInt64(UInt32.max))))) }
             newMoov = MovieIndexWriter.box("mvhd", mvhd) + newMoov
         }
@@ -311,7 +482,7 @@ nonisolated enum MP4Fixer {
         // and add the new index.
         try writer.copy(from: source, range: 0..<source.size) { progress(Double($0) / Double(source.size)) }
         try writer.patch(Data("free".utf8), at: moov.offset + 4)
-        if let mdat = boxes.last(where: { $0.type == "mdat" }), mdat.offset + mdat.declaredSize > source.size {
+        if let mdat = boxes.last(where: { $0.type == "mdat" }), mdat.end > source.size {
             let size = source.size - mdat.offset
             if mdat.headerLength == 16 { try writer.patch(be64(size), at: mdat.offset + 8) }
             else if size <= UInt64(UInt32.max) { try writer.patch(be32(UInt32(size)), at: mdat.offset) }
@@ -325,29 +496,30 @@ nonisolated enum MP4Fixer {
     private static func rebuildTrack(_ trak: Data, fileSize: UInt64, movieTimescale: UInt32) -> (Data, UInt64, Int) {
         guard let mdia = MP4Boxes.child("mdia", of: trak), let mdhd = MP4Boxes.child("mdhd", of: mdia),
               let minf = MP4Boxes.child("minf", of: mdia), let stbl = MP4Boxes.child("stbl", of: minf),
-              let tables = tables(fromSampleTable: stbl) else { return (trak, 0, 0) }
+              let tables = tables(fromSampleTable: stbl, fileSize: fileSize) else { return (trak, 0, 0) }
         let kept = tables.keptCount(fileSize: fileSize)
         let timescale = (mdhd.first ?? 0) == 1 ? u32(mdhd, 20) : u32(mdhd, 12)
         let durations = truncate(tables.durations.map { ($0.count, $0.delta) }, to: kept)
-        let mediaDuration = durations.reduce(UInt64(0)) { $0 + UInt64($1.count) * UInt64($1.value) }
-        let movieDuration = UInt64((Double(mediaDuration) / Double(max(timescale, 1)) * Double(movieTimescale)).rounded())
+        // Wrapping math: damaged runs can't trap (a u32 × u32 product always fits).
+        let mediaDuration = durations.reduce(UInt64(0)) { $0 &+ UInt64($1.count) * UInt64($1.value) }
+        let movieDuration = ticks(Double(mediaDuration) / Double(max(timescale, 1)) * Double(movieTimescale))
 
         // New sample table: one sample per chunk keeps chunk bookkeeping simple.
         let samples = tables.samples.prefix(kept)
         var parts = Data()
         if let stsd = MP4Boxes.box("stsd", in: stbl) { parts.append(stsd) }
-        var stts = be32(UInt32(durations.count))
+        var stts = be32(UInt32(clamping: durations.count))
         for run in durations { stts.append(be32(run.count) + be32(run.value)) }
         parts.append(MovieIndexWriter.fullBox("stts", stts))
         if let offsets = tables.compositionOffsets {
             let runs = truncate(offsets.map { ($0.count, $0.offset) }, to: kept)
-            var ctts = be32(UInt32(runs.count))
+            var ctts = be32(UInt32(clamping: runs.count))
             for run in runs { ctts.append(be32(run.count) + be32(run.value)) }
             parts.append(MovieIndexWriter.fullBox("ctts", version: tables.cttsVersion, ctts))
         }
         if let sync = tables.syncSamples {
-            let keptSync = sync.filter { $0 <= UInt32(kept) }.sorted()
-            var stss = be32(UInt32(keptSync.count))
+            let keptSync = sync.filter { $0 <= UInt32(clamping: kept) }.sorted()
+            var stss = be32(UInt32(clamping: keptSync.count))
             for number in keptSync { stss.append(be32(number)) }
             parts.append(MovieIndexWriter.fullBox("stss", stss))
         }
@@ -355,15 +527,15 @@ nonisolated enum MP4Fixer {
         var stscCount: UInt32 = 0
         var lastDescription: UInt32 = 0
         for (index, sample) in samples.enumerated() where sample.descriptionIndex != lastDescription {
-            stsc.append(be32(UInt32(index + 1)) + be32(1) + be32(sample.descriptionIndex))
+            stsc.append(be32(UInt32(clamping: index + 1)) + be32(1) + be32(sample.descriptionIndex))
             stscCount += 1
             lastDescription = sample.descriptionIndex
         }
         parts.append(MovieIndexWriter.fullBox("stsc", be32(stscCount) + stsc))
-        var stsz = be32(0) + be32(UInt32(kept))
+        var stsz = be32(0) + be32(UInt32(clamping: kept))
         for sample in samples { stsz.append(be32(sample.size)) }
         parts.append(MovieIndexWriter.fullBox("stsz", stsz))
-        var co64 = be32(UInt32(kept))
+        var co64 = be32(UInt32(clamping: kept))
         for sample in samples { co64.append(be64(sample.offset)) }
         parts.append(MovieIndexWriter.fullBox("co64", co64))
         // Other sample-table boxes that don't depend on the sample count are kept.
@@ -374,7 +546,9 @@ nonisolated enum MP4Fixer {
 
         // Patch durations on the way back up the tree.
         var newMdhd = mdhd
-        if (mdhd.first ?? 0) == 1 { newMdhd.replaceSubrange((newMdhd.startIndex + 24)..<(newMdhd.startIndex + 32), with: be64(mediaDuration)) }
+        if newMdhd.count < ((mdhd.first ?? 0) == 1 ? 32 : 20) {
+            // Too short to hold a duration (damage): left as it is.
+        } else if (mdhd.first ?? 0) == 1 { newMdhd.replaceSubrange((newMdhd.startIndex + 24)..<(newMdhd.startIndex + 32), with: be64(mediaDuration)) }
         else { newMdhd.replaceSubrange((newMdhd.startIndex + 16)..<(newMdhd.startIndex + 20), with: be32(UInt32(min(mediaDuration, UInt64(UInt32.max))))) }
         let newMinf = MP4Boxes.children(of: minf).reduce(into: Data()) { $0.append($1.type == "stbl" ? newStbl : Data($1.whole)) }
         let newMdia = MP4Boxes.children(of: mdia).reduce(into: Data()) { result, child in

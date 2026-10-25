@@ -6,19 +6,183 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    /// Reopens on the pane last used.
+    @AppStorage("settingsPane") private var pane: SettingsPane = .metadata
+
     var body: some View {
-        TabView {
-            Tab("Metadata", systemImage: "sparkle.magnifyingglass") {
-                MetadataSettingsView()
+        NavigationSplitView {
+            List(SettingsPane.allCases, selection: Binding(get: { pane }, set: { if let new = $0 { pane = new } })) { item in
+                SettingsSidebarRow(pane: item)
+                    .tag(item)
             }
-            Tab("Library", systemImage: "externaldrive") {
-                LibrarySettingsView()
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 210, max: 240)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            Group {
+                if pane.isAdministratorOnly, !model.canManageLibrary {
+                    AdministratorOnlyView()
+                } else {
+                    switch pane {
+                    case .metadata: MetadataSettingsView()
+                    case .library: LibrarySettingsView()
+                    case .playback: PlaybackSettingsView()
+                    case .parentalControls: ParentalControlsView()
+                    case .remote: RemoteSettingsView()
+                    }
+                }
             }
-            Tab("Parental Controls", systemImage: "lock.shield") {
-                ParentalControlsView()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .navigationTitle(pane.title)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .frame(width: 820, height: 600)
+        .tint(Theme.accent)
+        .background { AppBackground() }
+        .background(WindowCentering())
+        // Administrator PIN prompts asked for from Settings show over this window.
+        .overlay {
+            if model.pinHost == .settings {
+                PINOverlay()
             }
         }
-        .frame(width: 620, height: 640)
+        .animation(.smooth(duration: 0.25), value: model.pinRequest?.id)
+        .onDisappear { model.cancelPINRequest(in: .settings) }
+    }
+}
+
+/// Shown in place of a management pane to anyone but the household administrator.
+private struct AdministratorOnlyView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Administrator Only", systemImage: "crown.fill")
+        } description: {
+            Text("Only the household administrator can change these settings.")
+        } actions: {
+            if let administrator = model.administratorProfile, model.profile?.id != administrator.id {
+                Button("Switch to Administrator…") {
+                    model.requestOpen(administrator, in: .settings)
+                }
+                .buttonStyle(.theaterGlass)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The sections of Settings, listed in its sidebar.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case metadata, library, playback, parentalControls, remote
+
+    var id: String { rawValue }
+
+    /// Panes that manage the household (sources, library, PINs, remote), not just preferences.
+    var isAdministratorOnly: Bool { self != .playback }
+
+    var title: String {
+        switch self {
+        case .metadata: "Metadata"
+        case .library: "Library"
+        case .playback: "Playback"
+        case .parentalControls: "Parental Controls"
+        case .remote: "Remote"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .metadata: "sparkle.magnifyingglass"
+        case .library: "externaldrive.fill"
+        case .playback: "play.rectangle.fill"
+        case .parentalControls: "lock.shield.fill"
+        case .remote: "iphone.radiowaves.left.and.right"
+        }
+    }
+
+    /// The tile color behind the icon, System Settings style.
+    var color: Color {
+        switch self {
+        case .metadata: Color(hex: 0x3B82F6)
+        case .library: Color(hex: 0x8A4DFF)
+        case .playback: Theme.accent
+        case .parentalControls: Color(hex: 0x22A06B)
+        case .remote: Color(hex: 0xF59E0B)
+        }
+    }
+}
+
+private struct SettingsSidebarRow: View {
+    let pane: SettingsPane
+
+    var body: some View {
+        Label {
+            Text(pane.title)
+        } icon: {
+            Image(systemName: pane.systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(pane.color.gradient, in: .rect(cornerRadius: 6))
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// The app's look for a Settings tab: the ambient backdrop shows through the grouped
+/// form, whose sections read as translucent panels.
+private struct SettingsFormStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+    }
+}
+
+/// Keeps the Settings window centered on screen every time it opens, rather than wherever
+/// it was last left: it's centered when first shown, and again as it closes so the next
+/// opening (which may reuse the same window) starts in the middle too.
+private struct WindowCentering: NSViewRepresentable {
+    func makeNSView(context: Context) -> CenteringView { CenteringView() }
+    func updateNSView(_ nsView: CenteringView, context: Context) {}
+
+    final class CenteringView: NSView {
+        private var closeObserver: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+            closeObserver = nil
+            guard let window else { return }
+            // Don't let AppKit restore a saved position over ours.
+            window.setFrameAutosaveName("")
+            window.isRestorable = false
+            // After SwiftUI has sized the window for its content.
+            Task { @MainActor [weak window] in if let window { Self.center(window) } }
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak window] _ in
+                MainActor.assumeIsolated {
+                    if let window { Self.center(window) }
+                }
+            }
+        }
+
+        /// Exactly centered in the visible part of the screen (AppKit's `center()` sits a little high).
+        private static func center(_ window: NSWindow) {
+            guard let screen = window.screen ?? NSScreen.main else { return }
+            let area = screen.visibleFrame
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: (area.midX - size.width / 2).rounded(),
+                                          y: (area.midY - size.height / 2).rounded()))
+        }
+
+        isolated deinit {
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        }
     }
 }
 
@@ -36,6 +200,7 @@ private struct MetadataSettingsView: View {
             ForEach(MetadataProviderID.allCases) { provider in
                 ProviderSection(provider: provider, settings: settings, service: model.library.metadata)
             }
+            OpenSubtitlesSettingsSection()
             Section {
                 Toggle("Fetch info automatically when adding media", isOn: Binding(
                     get: { settings.autoFetch }, set: { settings.autoFetch = $0 }
@@ -51,7 +216,7 @@ private struct MetadataSettingsView: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
+        .modifier(SettingsFormStyle())
     }
 }
 
@@ -63,6 +228,13 @@ private struct ProviderSection: View {
     @State private var key = ""
     @State private var isTesting = false
     @State private var testResult: (success: Bool, message: String)?
+    /// A saved key is locked behind the administrator PIN; unlocking lasts while Settings is open.
+    @State private var isUnlocked = false
+    @State private var pinRequest: PINRequest?
+
+    private var isLocked: Bool {
+        settings.hasKey(provider) && AdministratorPIN.isSet && !isUnlocked
+    }
 
     var body: some View {
         Section {
@@ -87,11 +259,25 @@ private struct ProviderSection: View {
             }
 
             if provider.requiresAPIKey {
-                SecureField("API Key", text: $key, prompt: Text(provider == .tmdb ? "API key or read access token" : "API key"))
-                    .onChange(of: key) { _, newValue in
-                        settings.setAPIKey(newValue, for: provider)
-                        testResult = nil
+                if isLocked {
+                    HStack {
+                        Label("Key saved  ••••\(String(key.suffix(4)))", systemImage: "lock.fill")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Change Key…") {
+                            pinRequest = PINRequest(title: "Administrator PIN", message: "Enter the administrator PIN to change the \(provider.displayName) key.",
+                                                    profile: nil, kind: .verify(AdministratorPIN.verify)) { _ in
+                                isUnlocked = true
+                            }
+                        }
                     }
+                } else {
+                    SecureField("API Key", text: $key, prompt: Text(provider == .tmdb ? "API key or read access token" : "API key"))
+                        .onChange(of: key) { _, newValue in
+                            settings.setAPIKey(newValue, for: provider)
+                            testResult = nil
+                        }
+                }
             }
 
             HStack {
@@ -120,6 +306,9 @@ private struct ProviderSection: View {
             }
         }
         .onAppear { key = settings.apiKey(for: provider) ?? "" }
+        .sheet(item: $pinRequest) { request in
+            PINPadView(request: request) { pinRequest = nil }
+        }
     }
 
     private func runTest() {
@@ -134,7 +323,10 @@ private struct ProviderSection: View {
 
 private struct LibrarySettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var isConfirmingReset = false
+    /// The watched folder waiting on "Stop watching?".
+    @State private var removingFolder: LibraryFolder?
     @State private var pinRequest: PINRequest?
 
     private var library: MediaLibrary { model.library }
@@ -168,20 +360,27 @@ private struct LibrarySettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: 260, alignment: .trailing)
-                        Button("Remove") { library.removeFolder(folder) }
+                        Button("Remove…") { removingFolder = folder }
+                            .accessibilityLabel("Stop watching \(folder.displayName)")
                     }
                 }
-                Toggle("Automatically add new videos from these folders", isOn: Bindable(library).watchesFolders)
-                    .help("New files are added and deleted files are removed as soon as they change. Titles on a disconnected drive are kept.")
+                Text("These folders are watched, including folders on network drives. Deleted videos leave the library; new ones wait for approval in Library. Titles on a disconnected drive are kept.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
-                    Button("Add Folder…") { model.addMedia() }
-                    Button("Rescan All") { Task { await library.rescanFolders() } }
+                    Button("Add Folder…") {
+                        // The file panel belongs to the main window.
+                        openWindow(id: AppWindow.mainID)
+                        model.addMedia()
+                    }
+                    .disabled(library.isBusy)
+                    Button("Rescan All") { model.rescanLibraryFolders(in: .settings) }
                         .disabled(library.folders.isEmpty || library.isBusy)
                 }
             }
             Section {
                 LabeledContent("Titles", value: "\(library.titles.count)")
-                Button("Refresh All Info") { Task { await library.refreshMetadata(force: true) } }
+                Button("Refresh All Info") { model.refreshInfo(in: .settings) }
                     .disabled(library.titles.isEmpty || library.isBusy)
             } header: {
                 Text("Metadata")
@@ -190,7 +389,7 @@ private struct LibrarySettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
-                Text("Every file plays with the built-in Theater engine. Containers: MP4, M4V, MOV, 3GP, MKV, WebM, AVI, MPEG-TS and Blu-ray/AVCHD M2TS, MPEG program streams (MPG, VOB), Ogg, FLV, and DV. Video: H.264, HEVC (including HDR10, HLG, and Dolby Vision), AV1, VP9, VP8, Theora, MPEG-1, MPEG-2, MPEG-4 Part 2 (Xvid/DivX), H.263, Apple ProRes, DV, and Motion JPEG. Audio: AAC (including LATM broadcast audio), Apple Lossless, FLAC, Opus, Vorbis, Dolby Digital, Dolby Digital Plus, the Dolby Digital core of TrueHD, DTS (core, including DTS-HD tracks), MP3, MP2, PCM and LPCM, ADPCM, µ-law, A-law, and AMR. Subtitles: SRT, ASS/SSA, MP4 text, Blu-ray PGS, DVD subtitles, DVB subtitles, and Teletext. Files using other formats are added and flagged.")
+                Text("Every file plays with the built-in Theater engine. Containers: MP4, M4V, MOV, 3GP, MKV, WebM, AVI, MPEG-TS and Blu-ray/AVCHD M2TS, MPEG program streams (MPG, VOB), Ogg, FLV, and DV. Video: H.264, HEVC (including HDR10, HLG, and Dolby Vision), AV1, VP9, VP8, Theora, MPEG-1, MPEG-2, MPEG-4 Part 2 (Xvid/DivX), H.263, Apple ProRes, DV, and Motion JPEG. Audio: AAC (including LATM broadcast audio), Apple Lossless, FLAC, Opus, Vorbis, Dolby Digital, Dolby Digital Plus, Dolby TrueHD (lossless, including Atmos beds), DTS (core, including DTS-HD tracks), MP3, MP2, PCM and LPCM, ADPCM, µ-law, A-law, and AMR. Subtitles: SRT, ASS/SSA, MP4 text, Blu-ray PGS, DVD subtitles, DVB subtitles, and Teletext. Files using other formats are added and flagged.")
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Formats")
@@ -228,10 +427,22 @@ private struct LibrarySettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
+        .modifier(SettingsFormStyle())
         .sheet(item: $pinRequest) { request in
             PINPadView(request: request) { pinRequest = nil }
                 .padding(20)
+        }
+        .confirmationDialog("Stop watching “\(removingFolder?.displayName ?? "")”?",
+                            isPresented: Binding(get: { removingFolder != nil }, set: { if !$0 { removingFolder = nil } }),
+                            titleVisibility: .visible, presenting: removingFolder) { folder in
+            Button("Stop Watching Folder", role: .destructive) {
+                model.manageLibrary("Enter the administrator PIN to stop watching “\(folder.displayName)”.", in: .settings) {
+                    library.removeFolder(folder)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("New videos in this folder won't be added any more. Titles already in your library stay, and no files are deleted.")
         }
         .confirmationDialog("Reset Ultimate Theater?", isPresented: $isConfirmingReset, titleVisibility: .visible) {
             Button("Erase Everything and Reset", role: .destructive) { model.resetEverything() }
@@ -246,6 +457,8 @@ private struct ParentalControlsView: View {
     @Environment(AppModel.self) private var model
     @State private var hasPIN = AdministratorPIN.isSet
     @State private var pinRequest: PINRequest?
+    /// Shown when the Keychain refused a PIN change.
+    @State private var pinSaveError: String?
 
     var body: some View {
         Form {
@@ -261,11 +474,19 @@ private struct ParentalControlsView: View {
                     if hasPIN {
                         Button("Turn Off…", role: .destructive) {
                             verifyThen {
-                                AdministratorPIN.set(nil)
-                                hasPIN = false
+                                if AdministratorPIN.set(nil) {
+                                    hasPIN = false
+                                    pinSaveError = nil
+                                } else {
+                                    pinSaveError = "The administrator PIN couldn't be removed from the Keychain, so it's still on."
+                                }
                             }
                         }
                     }
+                }
+                if let pinSaveError {
+                    Label(pinSaveError, systemImage: "xmark.octagon.fill")
+                        .foregroundStyle(.red)
                 }
             } header: {
                 Text("Administrator")
@@ -315,7 +536,7 @@ private struct ParentalControlsView: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .modifier(SettingsFormStyle())
         .sheet(item: $pinRequest) { request in
             PINPadView(request: request) { pinRequest = nil }
                 .padding(20)
@@ -336,8 +557,52 @@ private struct ParentalControlsView: View {
 
     private func choosePIN() {
         pinRequest = PINRequest(title: "New Administrator PIN", message: "Choose a four-digit PIN.", profile: nil, kind: .create) { pin in
-            AdministratorPIN.set(pin)
-            hasPIN = true
+            if AdministratorPIN.set(pin) {
+                hasPIN = true
+                pinSaveError = nil
+            } else {
+                pinSaveError = "The new PIN couldn't be saved to the Keychain. The previous setting is unchanged."
+            }
         }
+    }
+}
+
+/// Settings shared by every profile for how episodes play.
+enum PlaybackSettings {
+    static let autoplayKey = "autoplayNextEpisode"
+    /// The Up Next countdown, in seconds, before the next episode starts on its own (at the
+    /// end of the file).
+    static let countdownSeconds = 15
+    /// Without detected credits, Up Next appears this many seconds before the end.
+    static let upNextLeadSeconds = 20
+    /// Episodes in a row with no input before asking "Are you still watching?".
+    static let stillWatchingAfter = 3
+}
+
+private struct PlaybackSettingsView: View {
+    @AppStorage(PlaybackSettings.autoplayKey) private var autoplayNext = true
+    @AppStorage(CastSettings.discoveryKey) private var findsCastingDevices = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Play the next episode automatically", isOn: $autoplayNext)
+            } header: {
+                Text("TV Shows")
+            } footer: {
+                Text(autoplayNext
+                     ? "Up Next appears once an episode's credits are over (or in its last \(PlaybackSettings.upNextLeadSeconds) seconds when no credits are found). The next episode starts when the episode ends, after a \(PlaybackSettings.countdownSeconds)-second countdown. After \(PlaybackSettings.stillWatchingAfter) episodes in a row with no activity, Ultimate Theater asks whether you're still watching."
+                     : "Up Next still appears at the end of each episode, but the next one only starts when you choose Play Now.")
+            }
+            Section {
+                Toggle("Find casting devices on this network", isOn: $findsCastingDevices)
+                    .onChange(of: findsCastingDevices) { CastDiscovery.shared.applySetting() }
+            } header: {
+                Text("Casting")
+            } footer: {
+                Text("After you first open the Cast menu, Ultimate Theater looks for Chromecast, Google TV, DLNA smart TVs, and Roku devices on your local network while a video is open. Nothing leaves your network: when you cast, the device streams the video directly from this Mac through a private, single-use link that stops working when casting ends.")
+            }
+        }
+        .modifier(SettingsFormStyle())
     }
 }

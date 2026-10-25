@@ -19,6 +19,15 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
     private var tables: [Int: SampleTable] = [:]
     /// Track IDs in the order their tables were read (stable tie-breaking).
     private var tableOrder: [Int] = []
+    /// A track read out of file order because it fell behind (a file storing one track apart
+    /// from another); it's read until it catches up.
+    private var catchingUpID: Int?
+
+    /// How far (seconds of decode time) a track may fall behind before it's read out of file order.
+    static let maxTrackLag: Double = 1.5
+    /// Most sample records one track may hold; more come from damaged tables (and would
+    /// exhaust memory). Ten hours at 60 frames a second is about 2.2 million.
+    static let maxSamplesPerTrack = 20_000_000
 
     struct Sample {
         var offset: UInt64
@@ -54,11 +63,11 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         }
 
         func pts(_ sample: Sample) -> Double {
-            Double(sample.dts + Int64(sample.ctsOffset) - mediaStart) / timescale
+            Double(sample.dts &+ Int64(sample.ctsOffset) &- mediaStart) / timescale
         }
 
         func dts(_ sample: Sample) -> Double {
-            Double(sample.dts - decodeShift - mediaStart) / timescale
+            Double(sample.dts &- decodeShift &- mediaStart) / timescale
         }
     }
 
@@ -71,17 +80,17 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
     // MARK: Packets
 
     func nextPacket() throws -> MediaPacket? {
-        // Read in file order across enabled tracks, so reads stay sequential.
-        var best: (id: Int, offset: UInt64)?
-        for id in tableOrder where enabledTrackIDs.contains(id) {
-            guard let table = tables[id], table.cursor < table.samples.count else { continue }
-            let offset = table.samples[table.cursor].offset
-            if best == nil || offset < best!.offset { best = (id, offset) }
-        }
-        guard let id = best?.id, var table = tables[id] else { return nil }
-        let sample = table.samples[table.cursor]
-        table.cursor += 1
-        tables[id] = table
+        var id = 0
+        var table: SampleTable
+        var sample: Sample
+        repeat {
+            guard let nextID = nextTrackID(), let found = tables[nextID] else { return nil }
+            id = nextID
+            table = found
+            sample = table.samples[table.cursor]
+            table.cursor += 1
+            tables[id] = table
+        } while sample.size > FileByteSource.maxPayloadSize // A damaged size entry; skip the sample.
 
         let data = try source.read(at: sample.offset, count: sample.size)
         guard data.count == sample.size else { throw ContainerError.truncated }
@@ -91,8 +100,47 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
                            isKeyframe: sample.isSync, data: data)
     }
 
+    /// The track whose next sample is read. Normally that's file order, the sequential read
+    /// an interleaved file is written for. A track whose next decode time falls more than
+    /// `maxTrackLag` behind the file-order choice (one track stored before another) is read
+    /// until it catches up, so the two arrive together in bursts rather than the whole first
+    /// track having to be buffered before the second starts.
+    private func nextTrackID() -> Int? {
+        /// The next sample's decode time; a damaged timescale gives none (file order only).
+        func nextTime(_ id: Int) -> Double? {
+            guard let table = tables[id], table.cursor < table.samples.count else { return nil }
+            let time = table.dts(table.samples[table.cursor])
+            return time.isFinite ? time : nil
+        }
+        var inFileOrder: (id: Int, offset: UInt64)?
+        var lagging: (id: Int, time: Double)?
+        var active: [Int] = []
+        for id in tableOrder where enabledTrackIDs.contains(id) {
+            guard let table = tables[id], table.cursor < table.samples.count else { continue }
+            active.append(id)
+            let offset = table.samples[table.cursor].offset
+            if inFileOrder.map({ offset < $0.offset }) ?? true { inFileOrder = (id, offset) }
+            if let time = nextTime(id), lagging.map({ time < $0.time }) ?? true { lagging = (id, time) }
+        }
+        guard let fileOrderID = inFileOrder?.id else { return nil }
+
+        // Keep catching up until the lagging track reaches the others.
+        if let id = catchingUpID {
+            let others = active.filter { $0 != id }.compactMap(nextTime).min()
+            if active.contains(id), let time = nextTime(id), let others, time < others { return id }
+            catchingUpID = nil
+        }
+        if let lagging, lagging.id != fileOrderID, let leader = nextTime(fileOrderID),
+           leader - lagging.time > Self.maxTrackLag {
+            catchingUpID = lagging.id
+            return lagging.id
+        }
+        return fileOrderID
+    }
+
     @discardableResult
     func seek(to seconds: Double) throws -> Double {
+        catchingUpID = nil
         var landing = max(seconds, 0)
         // Video lands on the sync sample at or before the target; everything else follows it.
         if let videoID = tableOrder.first(where: { tables[$0]?.track.kind == .video && enabledTrackIDs.contains($0) }),
@@ -131,14 +179,21 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
                 size = source.size - position
             }
             guard size >= headerLength else { throw ContainerError.corrupt("invalid box size") }
+            // A box claiming more than the file holds was cut short; read what exists, then stop.
+            let available = source.size - position
+            let bodyLength = Int(min(size, available) - min(headerLength, available))
             switch type {
             case "moov":
-                moov = ArraySlice(try source.read(at: position + headerLength, count: Int(size - headerLength)))
+                // The index must be parsed whole; large files (long, many tracks) can exceed
+                // the usual read limit.
+                moov = ArraySlice(try source.read(at: position + headerLength, count: bodyLength,
+                                                  limit: FileByteSource.maxIndexSize))
             case "moof":
-                fragments.append((position, ArraySlice(try source.read(at: position + headerLength, count: Int(size - headerLength)))))
+                fragments.append((position, ArraySlice(try source.read(at: position + headerLength, count: bodyLength))))
             default:
                 break // mdat, free, … are read on demand.
             }
+            guard size < available else { break }
             position += size
         }
         guard let moov else { throw ContainerError.incomplete }
@@ -176,8 +231,9 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         // QuickTime chapter tracks become chapters rather than subtitles.
         for id in chapterTrackIDs {
             guard let table = tables[id] else { continue }
-            chapters = try table.samples.map { sample in
-                let data = try source.read(at: sample.offset, count: sample.size)
+            // A damaged table can't make this read the whole file: titles are short.
+            chapters = try table.samples.prefix(10_000).map { sample in
+                let data = try source.read(at: sample.offset, count: min(sample.size, 1 << 16))
                 return ContainerChapter(title: Self.timedText(data) ?? "Chapter", start: table.pts(sample),
                                         end: table.pts(sample) + Double(sample.duration) / table.timescale)
             }
@@ -237,12 +293,13 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         let channels = max(track.channels ?? 2, 1)
         var chunkBytes: ((Int) -> Int)?
         switch track.codec {
-        case .pcm(let bits, _, _): chunkBytes = { $0 * max(bits / 8 * channels, 1) }
-        case .muLaw, .aLaw: chunkBytes = { $0 * channels }
-        case .appleIMA4: chunkBytes = { ($0 + 63) / 64 * 34 * channels }
+        case .pcm(let bits, _, _): chunkBytes = { Self.product($0, max(bits / 8 * channels, 1)) }
+        case .muLaw, .aLaw: chunkBytes = { Self.product($0, channels) }
+        case .appleIMA4: chunkBytes = { Self.product(($0 + 63) / 64 * 34, channels) }
         default: chunkBytes = nil
         }
-        let samples = Self.buildSamples(stblChildren, chunkBytes: chunkBytes)
+        let samples = Self.buildSamples(stblChildren, chunkBytes: chunkBytes, chunkGranule: track.codec == .appleIMA4 ? 64 : 1,
+                                        fileSize: source.size)
         if kind == .video, let first = samples.first, track.frameDuration == nil {
             track.frameDuration = Double(first.duration) / timescale
         }
@@ -251,17 +308,20 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         var mediaStart: Int64 = 0
         if let elst = children.first(where: { $0.type == "edts" }).flatMap({ Box.child("elst", in: $0.data) }) {
             let version = elst.first ?? 0
-            let count = Int(Box.u32(elst, 4))
+            let entrySize = version == 1 ? 20 : 12
+            let count = min(Int(Box.u32(elst, 4)), max(elst.count - 8, 0) / entrySize)
             var emptyDelay: Int64 = 0
             var offset = 8
             for _ in 0..<count {
-                let segment = version == 1 ? Int64(Box.u64(elst, offset)) : Int64(Box.u32(elst, offset))
+                let segment = version == 1 ? Int64(clamping: Box.u64(elst, offset)) : Int64(Box.u32(elst, offset))
                 let mediaTime = version == 1 ? Int64(bitPattern: Box.u64(elst, offset + 8)) : Int64(Int32(bitPattern: Box.u32(elst, offset + 4)))
-                offset += version == 1 ? 20 : 12
+                offset += entrySize
                 if mediaTime == -1 {
-                    emptyDelay += Int64(Double(segment) / movieTimescale * timescale)
+                    // A movie timescale of zero can't place the delay; ignore the empty edit.
+                    guard movieTimescale > 0 else { continue }
+                    emptyDelay = emptyDelay &+ Self.clampedInt64(Double(segment) / movieTimescale * timescale)
                 } else {
-                    mediaStart = mediaTime - emptyDelay
+                    mediaStart = mediaTime &- emptyDelay
                     break
                 }
             }
@@ -297,9 +357,9 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
             var total: UInt64 = 0
             while remaining > 0 {
                 while run < runs.count, used >= runs[run].count { run += 1; used = 0 }
-                guard run < runs.count else { return total + UInt64(remaining) * UInt64(runs.last?.value ?? 1) }
+                guard run < runs.count else { return total &+ UInt64(remaining) &* UInt64(runs.last?.value ?? 1) }
                 let take = min(remaining, runs[run].count - used)
-                total += UInt64(take) * UInt64(runs[run].value)
+                total = total &+ UInt64(take) &* UInt64(runs[run].value)
                 used += take
                 remaining -= take
             }
@@ -309,12 +369,17 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
 
     /// Builds one record per sample from stts/ctts/stss/stsc/stsz/stco. Uncompressed-style audio
     /// is grouped into one packet per chunk (`chunkBytes` converts frames to bytes), since
-    /// QuickTime lists every audio frame as a "sample".
-    private static func buildSamples(_ stbl: [Box], chunkBytes: ((Int) -> Int)?) -> [Sample] {
+    /// QuickTime lists every audio frame as a "sample". A chunk larger than a packet may be is
+    /// split into packets of whole `chunkGranule`-frame groups.
+    private static func buildSamples(_ stbl: [Box], chunkBytes: ((Int) -> Int)?, chunkGranule: Int = 1, fileSize: UInt64) -> [Sample] {
         func table(_ type: String) -> ArraySlice<UInt8>? { stbl.first { $0.type == type }?.data }
+        /// Entry count from a table header, limited to the entries the box actually holds.
+        func entryCount(_ data: ArraySlice<UInt8>, at offset: Int = 4, header: Int = 8, entrySize: Int) -> Int {
+            min(Int(Box.u32(data, offset)), max(data.count - header, 0) / entrySize)
+        }
         func runs(_ data: ArraySlice<UInt8>?) -> [(count: Int, value: UInt32)] {
             guard let data else { return [] }
-            return (0..<Int(Box.u32(data, 4))).map { (Int(Box.u32(data, 8 + $0 * 8)), Box.u32(data, 12 + $0 * 8)) }
+            return (0..<entryCount(data, entrySize: 8)).map { (Int(Box.u32(data, 8 + $0 * 8)), Box.u32(data, 12 + $0 * 8)) }
         }
 
         // Sample sizes, read on demand from the table.
@@ -323,11 +388,15 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         var sizeAt: (Int) -> Int = { _ in 0 }
         if let stsz = table("stsz") {
             fixedSize = Int(Box.u32(stsz, 4))
-            sampleCount = Int(Box.u32(stsz, 8))
+            // A fixed size can't describe more samples than the file holds bytes for. (Size 1 is
+            // QuickTime's implied-size convention, where compressed frames can be smaller.)
+            sampleCount = fixedSize > 1 ? min(Int(Box.u32(stsz, 8)), Int(clamping: fileSize / UInt64(fixedSize)))
+                : fixedSize != 0 ? Int(Box.u32(stsz, 8)) : entryCount(stsz, at: 8, header: 12, entrySize: 4)
             sizeAt = { fixedSize != 0 ? fixedSize : Int(Box.u32(stsz, 12 + $0 * 4)) }
         } else if let stz2 = table("stz2") {
             let fieldSize = Int(Box.u8(stz2, 7))
-            sampleCount = Int(Box.u32(stz2, 8))
+            let tableBytes = max(stz2.count - 12, 0)
+            sampleCount = min(Int(Box.u32(stz2, 8)), fieldSize == 4 ? tableBytes * 2 : fieldSize == 8 ? tableBytes : tableBytes / 2)
             sizeAt = { i in
                 switch fieldSize {
                 case 4: Int(Box.u8(stz2, 12 + i / 2) >> (i % 2 == 0 ? 4 : 0) & 0x0F)
@@ -338,21 +407,21 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         }
         var chunkOffsets: [UInt64] = []
         if let stco = table("stco") {
-            chunkOffsets = (0..<Int(Box.u32(stco, 4))).map { UInt64(Box.u32(stco, 8 + $0 * 4)) }
+            chunkOffsets = (0..<entryCount(stco, entrySize: 4)).map { UInt64(Box.u32(stco, 8 + $0 * 4)) }
         } else if let co64 = table("co64") {
-            chunkOffsets = (0..<Int(Box.u32(co64, 4))).map { Box.u64(co64, 8 + $0 * 8) }
+            chunkOffsets = (0..<entryCount(co64, entrySize: 8)).map { Box.u64(co64, 8 + $0 * 8) }
         }
         var stsc: [(firstChunk: Int, samplesPerChunk: Int)] = []
         if let data = table("stsc") {
-            stsc = (0..<Int(Box.u32(data, 4))).map { (Int(Box.u32(data, 8 + $0 * 12)), Int(Box.u32(data, 12 + $0 * 12))) }
+            stsc = (0..<entryCount(data, entrySize: 12)).map { (Int(Box.u32(data, 8 + $0 * 12)), Int(Box.u32(data, 12 + $0 * 12))) }
         }
         var deltas = RunIterator(runs(table("stts")))
         var compositionOffsets = RunIterator(runs(table("ctts")))
         let hasCompositionOffsets = table("ctts") != nil
-        let syncSamples: Set<Int>? = table("stss").map { stss in Set((0..<Int(Box.u32(stss, 4))).map { Int(Box.u32(stss, 8 + $0 * 4)) - 1 }) }
+        let syncSamples: Set<Int>? = table("stss").map { stss in Set((0..<entryCount(stss, entrySize: 4)).map { Int(Box.u32(stss, 8 + $0 * 4)) - 1 }) }
 
         var samples: [Sample] = []
-        samples.reserveCapacity(chunkBytes == nil ? sampleCount : chunkOffsets.count)
+        samples.reserveCapacity(chunkBytes == nil ? min(sampleCount, 1 << 20) : chunkOffsets.count)
         var sampleIndex = 0
         var dts: Int64 = 0
         var stscIndex = 0
@@ -365,22 +434,47 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
 
             if let chunkBytes {
                 // Fixed size 1 is QuickTime's "size per frame is implied" convention.
-                let bytes = fixedSize <= 1 ? chunkBytes(count) : (fixedSize != 0 ? fixedSize * count : (0..<count).reduce(0) { $0 + sizeAt(sampleIndex + $1) })
-                let span = deltas.advance(by: count)
-                samples.append(Sample(offset: chunkOffset, size: bytes, dts: dts, ctsOffset: 0, duration: UInt32(clamping: span), isSync: true))
-                dts += Int64(span)
+                func bytes(_ first: Int, _ frames: Int) -> Int {
+                    fixedSize <= 1 ? chunkBytes(frames)
+                        : fixedSize != 0 ? product(fixedSize, frames)
+                        : (0..<frames).reduce(0) { $0 &+ sizeAt(first + $1) }
+                }
+                let total = bytes(sampleIndex, count)
+                // A chunk too big for one packet (long uncompressed audio) becomes several.
+                var piece = count
+                if total > FileByteSource.maxPayloadSize {
+                    let granule = max(chunkGranule, 1)
+                    let granuleBytes = max(bytes(sampleIndex, min(granule, count)), 1)
+                    piece = max(FileByteSource.maxPayloadSize / granuleBytes, 1) * granule
+                }
+                var offset = chunkOffset
+                var done = 0
+                // Pieces past the end of the file come from a damaged table.
+                while done < count, samples.count < maxSamplesPerTrack, done == 0 || offset < fileSize {
+                    let frames = min(piece, count - done)
+                    let size = piece == count ? total : bytes(sampleIndex + done, frames)
+                    let span = deltas.advance(by: frames)
+                    samples.append(Sample(offset: offset, size: size, dts: dts, ctsOffset: 0, duration: UInt32(clamping: span), isSync: true))
+                    dts = dts &+ Int64(clamping: span)
+                    offset = offset &+ UInt64(clamping: size)
+                    done += frames
+                }
+                if done < count { dts = dts &+ Int64(clamping: deltas.advance(by: count - done)) }
                 sampleIndex += count
                 continue
             }
             var offset = chunkOffset
             for _ in 0..<count {
+                guard samples.count < maxSamplesPerTrack else { break }
+                // Samples past the end of the file come from a damaged table.
+                guard offset <= fileSize else { break }
                 let size = sizeAt(sampleIndex)
                 let delta = deltas.next()
                 let cts = hasCompositionOffsets ? Int32(bitPattern: compositionOffsets.next()) : 0
                 samples.append(Sample(offset: offset, size: size, dts: dts, ctsOffset: cts, duration: delta,
                                       isSync: syncSamples?.contains(sampleIndex) ?? true))
-                offset += UInt64(size)
-                dts += Int64(delta)
+                offset = offset &+ UInt64(clamping: size)
+                dts = dts &+ Int64(delta)
                 sampleIndex += 1
             }
         }
@@ -408,23 +502,39 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
             if flags & 0x10 != 0 { defaultSize = Box.u32(tfhd.data, cursor); cursor += 4 }
             if flags & 0x20 != 0 { defaultFlags = Box.u32(tfhd.data, cursor) }
 
-            var dts = table.samples.last.map { $0.dts + Int64($0.duration) } ?? 0
+            var dts = table.samples.last.map { $0.dts &+ Int64($0.duration) } ?? 0
             if let tfdt = children.first(where: { $0.type == "tfdt" }) {
-                dts = (tfdt.data.first ?? 0) == 1 ? Int64(Box.u64(tfdt.data, 4)) : Int64(Box.u32(tfdt.data, 4))
+                dts = (tfdt.data.first ?? 0) == 1 ? Int64(clamping: Box.u64(tfdt.data, 4)) : Int64(Box.u32(tfdt.data, 4))
             }
             var dataEnd = baseOffset
             for trun in children where trun.type == "trun" {
                 let runFlags = Box.u32(trun.data, 0) & 0xFFFFFF
-                let count = Int(Box.u32(trun.data, 4))
                 var at = 8
                 var offset = dataEnd
                 if runFlags & 0x01 != 0 {
-                    offset = UInt64(Int64(baseOffset) + Int64(Int32(bitPattern: Box.u32(trun.data, at))))
+                    // Skip runs whose data would start before the file or past its end.
+                    let relative = Int64(Int32(bitPattern: Box.u32(trun.data, at)))
+                    guard baseOffset <= source.size else { continue }
+                    let start = Int64(baseOffset) + relative
+                    guard start >= 0, UInt64(start) <= source.size else { continue }
+                    offset = UInt64(start)
                     at += 4
                 }
                 var firstFlags: UInt32?
                 if runFlags & 0x04 != 0 { firstFlags = Box.u32(trun.data, at); at += 4 }
+                // Limit the count to the entries the box holds (or a sane total for default-only runs).
+                let entrySize = [0x100, 0x200, 0x400, 0x800].filter { runFlags & $0 != 0 }.count * 4
+                let held = entrySize > 0 ? max(trun.data.count - at, 0) / entrySize : 1 << 20
+                var count = min(Int(Box.u32(trun.data, 4)), held)
+                if runFlags & 0x200 == 0 {
+                    // Every sample has the default size: zero-size samples carry nothing (a
+                    // damaged header), and the run can't hold more samples than the bytes left.
+                    guard defaultSize > 0, offset <= source.size else { continue }
+                    count = min(count, Int(clamping: (source.size - offset) / UInt64(defaultSize)))
+                }
+                count = min(count, max(Self.maxSamplesPerTrack - table.samples.count, 0))
                 for index in 0..<count {
+                    guard offset <= source.size else { break }
                     let duration = runFlags & 0x100 != 0 ? Box.u32(trun.data, at) : defaultDuration
                     if runFlags & 0x100 != 0 { at += 4 }
                     let size = runFlags & 0x200 != 0 ? Box.u32(trun.data, at) : defaultSize
@@ -436,8 +546,8 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
                     if runFlags & 0x800 != 0 { at += 4 }
                     table.samples.append(Sample(offset: offset, size: Int(size), dts: dts, ctsOffset: cts,
                                                 duration: duration, isSync: sampleFlags & 0x10000 == 0))
-                    offset += UInt64(size)
-                    dts += Int64(duration)
+                    offset = offset &+ UInt64(size)
+                    dts = dts &+ Int64(duration)
                 }
                 dataEnd = offset
             }
@@ -558,6 +668,7 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
             case "ac-3", "sac3": track.codec = .ac3
             case "ec-3": track.codec = .eac3
             case "dtsc", "dtsh", "dtsl": track.codec = .dts
+            case "mlpa": track.codec = .trueHD
             case "dtse": track.codec = .unsupported("DTS Express")
             case "alac":
                 track.codec = .alac
@@ -636,6 +747,20 @@ nonisolated final class MP4Demuxer: MediaDemuxer {
         return code == "und" ? nil : code
     }
 
+    /// Product that saturates instead of trapping on damaged size fields.
+    static func product(_ a: Int, _ b: Int) -> Int {
+        let (value, overflow) = a.multipliedReportingOverflow(by: b)
+        return overflow ? Int.max : value
+    }
+
+    /// Converts to Int64, saturating non-finite and out-of-range values.
+    static func clampedInt64(_ value: Double) -> Int64 {
+        guard value.isFinite else { return 0 }
+        if value >= 9.2e18 { return .max }
+        if value <= -9.2e18 { return .min }
+        return Int64(value)
+    }
+
     static func fourCC(_ text: String) -> UInt32 {
         text.utf8.prefix(4).reduce(0) { $0 << 8 | UInt32($1) }
     }
@@ -655,16 +780,20 @@ nonisolated struct Box {
         var boxes: [Box] = []
         var at = data.startIndex
         while at + 8 <= data.endIndex {
+            let remaining = data.endIndex - at
             var size = Int(data[at..<(at + 4)].reduce(UInt32(0)) { $0 << 8 | UInt32($1) })
             let type = String(decoding: data[(at + 4)..<(at + 8)], as: UTF8.self)
             var header = 8
-            if size == 1, at + 16 <= data.endIndex {
-                size = Int(data[(at + 8)..<(at + 16)].reduce(UInt64(0)) { $0 << 8 | UInt64($1) })
+            if size == 1, remaining >= 16 {
+                // Compare 64-bit sizes against the bytes left before converting.
+                let large = data[(at + 8)..<(at + 16)].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+                guard large <= UInt64(remaining) else { break }
+                size = Int(large)
                 header = 16
             } else if size == 0 {
-                size = data.endIndex - at
+                size = remaining
             }
-            guard size >= header, at + size <= data.endIndex else { break }
+            guard size >= header, size <= remaining else { break }
             boxes.append(Box(type: type, data: data[(at + header)..<(at + size)]))
             at += size
         }

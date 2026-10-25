@@ -20,6 +20,7 @@ import Foundation
 import AudioToolbox
 import CoreMedia
 import VideoToolbox
+import os
 
 nonisolated enum MovieRepairError: LocalizedError {
     case notDamaged
@@ -52,7 +53,9 @@ nonisolated struct MovieRepairReport: Sendable {
     let unrecoveredBytes: Int64
 }
 
-nonisolated final class MovieRepairer {
+// Its stored state is immutable except the source's read cache; a repair uses it from one
+// task at a time (diagnose, then analyze, then write), never concurrently.
+nonisolated final class MovieRepairer: @unchecked Sendable {
     /// Video and audio samples found in the damaged file, in file order.
     struct Analysis {
         var videoSamples: [(offset: UInt64, size: Int, isKeyframe: Bool, order: Int64)] = []
@@ -83,7 +86,7 @@ nonisolated final class MovieRepairer {
             let type = String(decoding: header[4..<8], as: UTF8.self)
             var headerLength: UInt64 = 8
             if size == 1, header.count >= 16 { size = UInt64(header[8..<16].bigEndianUInt); headerLength = 16 }
-            if size == 0 || offset + size > source.size { size = source.size - offset } // Runs to the end (or was cut off).
+            if size == 0 || size > source.size - offset { size = source.size - offset } // Runs to the end (or was cut off).
             guard size >= headerLength else { break }
             if type == "moov" { throw MovieRepairError.notDamaged }
             if type == "ftyp" { ftyp = try source.read(at: offset, count: Int(size)) }
@@ -160,18 +163,20 @@ nonisolated final class MovieRepairer {
                                            imageBufferAttributes: nil, outputCallback: nil, decompressionSessionOut: &session) == noErr,
               let session else { return false }
         defer { VTDecompressionSessionInvalidate(session) }
-        var good = 0
-        var bad = 0
+        // The output handler runs on VideoToolbox's threads.
+        let counts = OSAllocatedUnfairLock(initialState: (good: 0, bad: 0))
         for frame in frames {
             let packet = MediaPacket(trackID: 0, pts: 0, isKeyframe: true, data: frame)
             guard let sample = try? TrackFormatter.videoSample(frame, format: format, packet: packet) else { return false }
             let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, _, image, _, _ in
-                if status == noErr, image != nil { good += 1 } else { bad += 1 }
+                let decoded = status == noErr && image != nil
+                counts.withLock { if decoded { $0.good += 1 } else { $0.bad += 1 } }
             }
-            if status != noErr { bad += 1 }
+            if status != noErr { counts.withLock { $0.bad += 1 } }
         }
         VTDecompressionSessionWaitForAsynchronousFrames(session)
-        return bad == 0 && good > 0
+        let result = counts.withLock { $0 }
+        return result.bad == 0 && result.good > 0
     }
 
     // MARK: Analysis
@@ -214,7 +219,7 @@ nonisolated final class MovieRepairer {
         while position < mediaData.upperBound {
             if let frameLimit, analysis.videoSamples.count >= frameLimit { break }
             let fraction = Double(position - mediaData.lowerBound) / total
-            if fraction - lastReport > 0.002 { progress(fraction); lastReport = fraction }
+            if fraction - lastReport > 0.002 { try Task.checkCancellation(); progress(fraction); lastReport = fraction }
 
             if let unit = parser.unit(at: position, in: source, limit: mediaData.upperBound) {
                 runFamily = nil
@@ -262,16 +267,15 @@ nonisolated final class MovieRepairer {
         let moov = MovieIndexWriter.movie(analysis: analysis, plan: plan, reference: reference)
 
         // Copy the file in chunks (so progress can be shown), then add the index.
-        let manager = FileManager.default
-        try? manager.removeItem(at: output)
-        guard manager.createFile(atPath: output.path, contents: nil) else { throw CocoaError(.fileWriteNoPermission) }
-        let writer = try FileHandle(forWritingTo: output)
+        // A new file only: an existing one (the original included) is never removed or truncated.
+        let writer = try RepairOutput.createNewFile(at: output)
         defer { try? writer.close() }
         let reader = try FileHandle(forReadingFrom: damagedURL)
         defer { try? reader.close() }
         let end = mediaData.upperBound
         var copied: UInt64 = 0
         while copied < end {
+            try Task.checkCancellation()
             let chunk = try reader.read(upToCount: Int(min(UInt64(8 << 20), end - copied))) ?? Data()
             guard !chunk.isEmpty else { break }
             try writer.write(contentsOf: chunk)
@@ -347,11 +351,19 @@ nonisolated struct RepairReference {
         var moov: Data?
         while offset + 8 <= source.size {
             let header = try source.read(at: offset, count: 16)
+            guard header.count >= 8 else { break }
             var size = UInt64(header.prefix(4).bigEndianUInt)
-            if size == 1 { size = UInt64(header[8..<16].bigEndianUInt) }
-            if size == 0 { size = source.size - offset }
+            if size == 1 {
+                guard header.count >= 16 else { break }
+                size = UInt64(header[8..<16].bigEndianUInt)
+            }
+            // Missing or cut-off sizes run to the end of the file.
+            if size == 0 || size > source.size - offset { size = source.size - offset }
             guard size >= 8 else { break }
-            if header[4..<8] == Data("moov".utf8) { moov = try source.read(at: offset, count: Int(size)); break }
+            if header[4..<8] == Data("moov".utf8) {
+                moov = try source.read(at: offset, count: Int(clamping: size), limit: FileByteSource.maxIndexSize)
+                break
+            }
             offset += size
         }
         guard let moov else { throw MovieRepairError.unsupportedReference("it has no index either") }
@@ -380,17 +392,25 @@ nonisolated struct RepairReference {
                 var frames: UInt64 = 0
                 var ticks: UInt64 = 0
                 if stts.count >= 8 {
-                    let entries = Int(UInt32(stts[4]) << 24 | UInt32(stts[5]) << 16 | UInt32(stts[6]) << 8 | UInt32(stts[7]))
-                    for index in 0..<entries where 8 + index * 8 + 8 <= stts.count {
+                    // Only the entries the box holds; a damaged count can't loop billions of times.
+                    let declared = Int(UInt32(stts[4]) << 24 | UInt32(stts[5]) << 16 | UInt32(stts[6]) << 8 | UInt32(stts[7]))
+                    let entries = min(declared, (stts.count - 8) / 8)
+                    for index in 0..<entries {
                         let at = 8 + index * 8
                         let count = UInt64(stts[at]) << 24 | UInt64(stts[at + 1]) << 16 | UInt64(stts[at + 2]) << 8 | UInt64(stts[at + 3])
                         let delta = UInt64(stts[at + 4]) << 24 | UInt64(stts[at + 5]) << 16 | UInt64(stts[at + 6]) << 8 | UInt64(stts[at + 7])
-                        frames += count
-                        ticks += count * delta
+                        // Saturating: damaged counts and deltas can't overflow the totals.
+                        let (product, productOverflow) = count.multipliedReportingOverflow(by: delta)
+                        let (sum, sumOverflow) = ticks.addingReportingOverflow(product)
+                        ticks = productOverflow || sumOverflow ? .max : sum
+                        frames = frames.addingReportingOverflow(count).overflow ? .max : frames + count
                     }
                 }
-                let delta = frames > 0 ? UInt32((Double(ticks) / Double(frames)).rounded()) : 0
+                let average = frames > 0 ? (Double(ticks) / Double(frames)).rounded() : 0
+                let delta = average.isFinite && average < Double(UInt32.max) ? UInt32(max(average, 0)) : 0
                 video = (stsd, hdlr, language, timescale, delta, width, height, avcC)
+            } else if handler == "soun", timescale == 0 {
+                continue // A damaged sound track without a sample rate can't be timed.
             } else if handler == "soun", format == "mp4a" {
                 let sound = entry.dropFirst(8 + 28)
                 guard let esds = MP4Boxes.child("esds", of: sound) ?? MP4Boxes.child("wave", of: sound).flatMap({ MP4Boxes.child("esds", of: $0) }),
@@ -500,10 +520,17 @@ nonisolated enum MP4Boxes {
         var boxes: [Box] = []
         var at = data.startIndex
         while at + 8 <= data.endIndex {
+            let remaining = data.endIndex - at
             var size = Int(data[at..<(at + 4)].bigEndianUInt)
             var header = 8
-            if size == 1, at + 16 <= data.endIndex { size = Int(data[(at + 8)..<(at + 16)].bigEndianUInt); header = 16 }
-            if size == 0 { size = data.endIndex - at }
+            if size == 1, remaining >= 16 {
+                // Compare 64-bit sizes against the bytes left before converting.
+                let large = data[(at + 8)..<(at + 16)].bigEndianUInt
+                guard large <= UInt64(remaining) else { break }
+                size = Int(large)
+                header = 16
+            }
+            if size == 0 { size = remaining }
             guard size >= header, at + size <= data.endIndex else { break }
             boxes.append(Box(type: String(decoding: data[(at + 4)..<(at + 8)], as: UTF8.self),
                              body: data[(at + header)..<(at + size)], whole: data[at..<(at + size)]))
@@ -928,7 +955,7 @@ nonisolated enum MovieIndexWriter {
     static func movie(analysis: MovieRepairer.Analysis, plan: TimingPlan, reference: RepairReference) -> Data {
         let movieTimescale: UInt32 = 1000
         let videoDuration = UInt64(analysis.videoSamples.count) * UInt64(plan.frameDuration)
-        let videoMovieDuration = UInt64((Double(videoDuration) / Double(plan.timescale) * Double(movieTimescale)).rounded())
+        let videoMovieDuration = ticks(Double(videoDuration) / Double(plan.timescale) * Double(movieTimescale))
         var traks = Data()
         traks.append(videoTrack(analysis: analysis, plan: plan, reference: reference, movieDuration: videoMovieDuration))
         var longest = videoMovieDuration
@@ -936,21 +963,28 @@ nonisolated enum MovieIndexWriter {
             let audio = reference.audio[planned.referenceIndex]
             let frames = planned.frames
             let duration = UInt64(frames.count) * UInt64(audio.samplesPerFrame)
-            let movieDuration = UInt64((Double(duration) / Double(audio.sampleRate) * Double(movieTimescale)).rounded())
+            let movieDuration = ticks(Double(duration) / Double(audio.sampleRate) * Double(movieTimescale))
             longest = max(longest, movieDuration)
             traks.append(audioTrack(id: UInt32(index + 2), frames: frames, track: audio,
                                     duration: duration, movieDuration: movieDuration, isEnabled: index == 0))
         }
-        let mvhd = fullBox("mvhd", join([u32(0), u32(0), u32(movieTimescale), u32(UInt32(longest)), u32(0x0001_0000), u16(0x0100),
-                                         Data(count: 10), matrix, Data(count: 24), u32(UInt32(plan.audioTracks.count + 2))]))
+        let mvhd = fullBox("mvhd", join([u32(0), u32(0), u32(movieTimescale), u32(UInt32(clamping: longest)), u32(0x0001_0000), u16(0x0100),
+                                         Data(count: 10), matrix, Data(count: 24), u32(UInt32(clamping: plan.audioTracks.count + 2))]))
         return box("moov", mvhd, traks)
+    }
+
+    /// A duration in whole ticks; non-finite or out-of-range values (from damaged timing)
+    /// saturate rather than trap.
+    static func ticks(_ value: Double) -> UInt64 {
+        guard value.isFinite, value > 0 else { return 0 }
+        return value >= 1.8e19 ? .max : UInt64(value.rounded())
     }
 
     private static func trackHeader(id: UInt32, duration: UInt64, isAudio: Bool, isEnabled: Bool, width: Int, height: Int) -> Data {
         fullBox("tkhd", flags: isEnabled ? 3 : 2,
-                join([u32(0), u32(0), u32(id), u32(0), u32(UInt32(duration)), Data(count: 8),
+                join([u32(0), u32(0), u32(id), u32(0), u32(UInt32(clamping: duration)), Data(count: 8),
                       u16(0), u16(isAudio ? 1 : 0), u16(isAudio ? 0x0100 : 0), u16(0), matrix,
-                      u32(UInt32(width) << 16), u32(UInt32(height) << 16)]))
+                      u32(UInt32(clamping: width) &<< 16), u32(UInt32(clamping: height) &<< 16)]))
     }
 
     private static func dataInformation() -> Data {
@@ -960,10 +994,10 @@ nonisolated enum MovieIndexWriter {
     private static func chunkTables(offsets: [UInt64], sizes: [Int]) -> Data {
         // One sample per chunk keeps the tables simple and works with any interleaving.
         let stsc = fullBox("stsc", join([u32(1), u32(1), u32(1), u32(1)]))
-        var sizeTable = u32(0) + u32(UInt32(sizes.count))
+        var sizeTable = u32(0) + u32(UInt32(clamping: sizes.count))
         sizeTable.reserveCapacity(8 + sizes.count * 4)
-        for size in sizes { sizeTable.append(u32(UInt32(size))) }
-        var offsetTable = u32(UInt32(offsets.count))
+        for size in sizes { sizeTable.append(u32(UInt32(clamping: size))) }
+        var offsetTable = u32(UInt32(clamping: offsets.count))
         offsetTable.reserveCapacity(4 + offsets.count * 8)
         for offset in offsets { offsetTable.append(u64(offset)) }
         return stsc + fullBox("stsz", sizeTable) + fullBox("co64", offsetTable)
@@ -973,23 +1007,24 @@ nonisolated enum MovieIndexWriter {
                                    movieDuration: UInt64) -> Data {
         let samples = analysis.videoSamples
         let mediaDuration = UInt64(samples.count) * UInt64(plan.frameDuration)
-        let stts = fullBox("stts", u32(1) + u32(UInt32(samples.count)) + u32(plan.frameDuration))
+        let stts = fullBox("stts", u32(1) + u32(UInt32(clamping: samples.count)) + u32(plan.frameDuration))
         // Composition offsets, run-length encoded.
         var runs: [(count: UInt32, offset: UInt32)] = []
-        for offset in plan.compositionOffsets.map({ UInt32($0) * plan.frameDuration }) {
+        for offset in plan.compositionOffsets.map({ UInt32(clamping: $0) &* plan.frameDuration }) {
             if let last = runs.last, last.offset == offset { runs[runs.count - 1].count += 1 } else { runs.append((1, offset)) }
         }
-        var ctts = u32(UInt32(runs.count))
+        var ctts = u32(UInt32(clamping: runs.count))
         for run in runs { ctts.append(u32(run.count) + u32(run.offset)) }
         let syncSamples = samples.indices.filter { samples[$0].isKeyframe }
-        var stss = u32(UInt32(syncSamples.count))
-        for index in syncSamples { stss.append(u32(UInt32(index + 1))) }
+        var stss = u32(UInt32(clamping: syncSamples.count))
+        for index in syncSamples { stss.append(u32(UInt32(clamping: index + 1))) }
         let stbl = box("stbl", reference.videoSampleDescription, stts, fullBox("ctts", ctts), fullBox("stss", stss),
                        chunkTables(offsets: samples.map(\.offset), sizes: samples.map(\.size)))
         let minf = box("minf", fullBox("vmhd", flags: 1, Data(count: 8)), dataInformation(), stbl)
-        let mdhd = fullBox("mdhd", join([u32(0), u32(0), u32(plan.timescale), u32(UInt32(mediaDuration)), u16(reference.videoLanguage), u16(0)]))
+        let mdhd = fullBox("mdhd", join([u32(0), u32(0), u32(plan.timescale), u32(UInt32(clamping: mediaDuration)), u16(reference.videoLanguage), u16(0)]))
         // The edit list hides the reordering delay so the first frame shows at time zero.
-        let edit = fullBox("elst", join([u32(1), u32(UInt32(movieDuration)), u32(UInt32(plan.initialDelay) * plan.frameDuration), u32(0x0001_0000)]))
+        let edit = fullBox("elst", join([u32(1), u32(UInt32(clamping: movieDuration)), u32(UInt32(clamping: plan.initialDelay) &* plan.frameDuration),
+                                         u32(0x0001_0000)]))
         return box("trak", trackHeader(id: 1, duration: movieDuration, isAudio: false, isEnabled: true,
                                        width: reference.width, height: reference.height),
                    box("edts", edit), box("mdia", mdhd, reference.videoHandler, minf))
@@ -997,10 +1032,10 @@ nonisolated enum MovieIndexWriter {
 
     private static func audioTrack(id: UInt32, frames: [(offset: UInt64, size: Int)], track: RepairReference.AudioTrack,
                                    duration: UInt64, movieDuration: UInt64, isEnabled: Bool) -> Data {
-        let stts = fullBox("stts", join([u32(1), u32(UInt32(frames.count)), u32(track.samplesPerFrame)]))
+        let stts = fullBox("stts", join([u32(1), u32(UInt32(clamping: frames.count)), u32(track.samplesPerFrame)]))
         let stbl = box("stbl", track.sampleDescription, stts, chunkTables(offsets: frames.map(\.offset), sizes: frames.map(\.size)))
         let minf = box("minf", fullBox("smhd", Data(count: 4)), dataInformation(), stbl)
-        let mdhd = fullBox("mdhd", join([u32(0), u32(0), u32(track.sampleRate), u32(UInt32(duration)), u16(track.language), u16(0)]))
+        let mdhd = fullBox("mdhd", join([u32(0), u32(0), u32(track.sampleRate), u32(UInt32(clamping: duration)), u16(track.language), u16(0)]))
         return box("trak", trackHeader(id: id, duration: movieDuration, isAudio: true, isEnabled: isEnabled, width: 0, height: 0),
                    box("mdia", mdhd, track.handler, minf))
     }

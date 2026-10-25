@@ -108,22 +108,44 @@ nonisolated enum MPEG4Part2 {
         }
     }
 
-    /// Splits DivX "packed bitstream" chunks (a P-VOP followed by a B-VOP) into single frames.
-    static func splitPacked(_ data: Data) -> [Data] {
-        let offsets = startCodeOffsets(in: data)
-        guard offsets.count > 1 else { return [data] }
-        var frames: [Data] = []
-        for (index, offset) in offsets.enumerated() {
-            let start = index == 0 ? 0 : offset // Keep any VOL headers with the first frame.
-            let end = index + 1 < offsets.count ? offsets[index + 1] : data.count
-            frames.append(data.subdata(in: (data.startIndex + start)..<(data.startIndex + end)))
+    /// Width of vop_time_increment, from the VOL header in a stream's setup data.
+    static func timeIncrementBits(inConfiguration data: Data) -> Int? {
+        let bytes = [UInt8](data)
+        guard let vol = (0..<max(bytes.count - 4, 0)).first(where: { i in
+            bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 && (0x20...0x2F).contains(bytes[i + 3])
+        }) else { return nil }
+        var reader = ElementaryBits(Array(bytes[(vol + 4)...]))
+        reader.skip(1 + 8)                              // random_accessible_vol, video_object_type_indication
+        if reader.read(1) == 1 { reader.skip(4 + 3) }   // is_object_layer_identifier: verid, priority
+        if reader.read(4) == 15 { reader.skip(16) }     // aspect_ratio_info, extended PAR
+        if reader.read(1) == 1 {                        // vol_control_parameters
+            reader.skip(2 + 1)                          // chroma_format, low_delay
+            if reader.read(1) == 1 { reader.skip(79) }  // vbv_parameters
         }
-        return frames
+        reader.skip(2 + 1)                              // video_object_layer_shape, marker
+        let resolution = reader.read(16)
+        guard resolution > 0 else { return nil }
+        var bits = 1
+        while (1 << bits) < resolution { bits += 1 }
+        return bits
     }
 
-    /// Placeholder "N-VOP" chunks emitted alongside packed frames carry no picture.
-    static func isPlaceholder(_ data: Data) -> Bool {
-        data.count <= 8 && !startCodeOffsets(in: data).isEmpty
+    /// MSB-first reader for small header fields.
+    private struct ElementaryBits {
+        let bytes: [UInt8]
+        var position = 0
+        init(_ bytes: [UInt8]) { self.bytes = bytes }
+        mutating func read(_ count: Int) -> Int {
+            var value = 0
+            for _ in 0..<count {
+                let byte = position >> 3
+                let bit = byte < bytes.count ? Int(bytes[byte] >> (7 - UInt8(position & 7))) & 1 : 0
+                value = value << 1 | bit
+                position += 1
+            }
+            return value
+        }
+        mutating func skip(_ count: Int) { position += count }
     }
 
     /// Configuration headers (visual object sequence through VOL) preceding the first VOP.
@@ -249,7 +271,11 @@ nonisolated struct AudioFramer {
     let codec: MediaCodec
     /// Only frames whose checksum verifies are returned (AC-3 inside other streams).
     let verifiesFrames: Bool
-    private var buffer = Data()
+    /// Pending bytes; `head` is where unconsumed data starts (compacted once per push), and
+    /// positions before `searched` are known not to start a frame.
+    private var buffer: [UInt8] = []
+    private var head = 0
+    private var searched = 0
 
     init(codec: MediaCodec, verifiesFrames: Bool = false) {
         self.codec = codec
@@ -258,35 +284,48 @@ nonisolated struct AudioFramer {
 
     /// Appends bytes and returns every complete frame now available.
     mutating func push(_ data: Data) -> [Data] {
-        buffer.append(data)
+        buffer.append(contentsOf: data)
         var frames: [Data] = []
-        while let (offset, length) = nextFrame(), offset + length <= buffer.count {
-            let frame = buffer.subdata(in: (buffer.startIndex + offset)..<(buffer.startIndex + offset + length))
+        while let (offset, length) = nextFrame() {
+            guard offset + length <= buffer.count else {
+                searched = offset // Incomplete: wait for more data.
+                break
+            }
+            let frame = buffer[offset..<(offset + length)]
             if verifiesFrames, !AC3.isIntact(frame) {
-                buffer.removeFirst(offset + 1) // A false sync word: keep looking.
+                head = offset + 1 // A false sync word: keep looking.
+                searched = head
                 continue
             }
-            frames.append(frame)
-            buffer.removeFirst(offset + length)
+            frames.append(Data(frame))
+            head = offset + length
+            searched = head
         }
-        if buffer.count > 1 << 20 { buffer.removeAll() } // Garbage; resynchronize.
+        if head > 0 {
+            buffer.removeFirst(head)
+            searched = max(0, searched - head)
+            head = 0
+        }
+        if buffer.count > 1 << 20 { reset() } // Garbage; resynchronize.
         return frames
     }
 
     mutating func reset() {
         buffer.removeAll()
+        head = 0
+        searched = 0
     }
 
     /// Offset and length of the next sync'd frame in the buffer.
-    private func nextFrame() -> (Int, Int)? {
-        let bytes = [UInt8](buffer)
-        var i = 0
-        while i + 6 < bytes.count {
-            if let length = frameLength(bytes, at: i), length > 0 {
+    private mutating func nextFrame() -> (Int, Int)? {
+        var i = max(head, searched)
+        while i + 6 < buffer.count {
+            if let length = frameLength(buffer, at: i), length > 0 {
                 return (i, length)
             }
             i += 1
         }
+        searched = i
         return nil
     }
 

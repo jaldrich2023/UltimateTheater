@@ -8,89 +8,148 @@ import SwiftData
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
-    @Query(sort: \WatchProgress.lastWatched, order: .reverse) private var allProgress: [WatchProgress]
-    @Query(sort: \MyListEntry.addedAt, order: .reverse) private var allMyList: [MyListEntry]
-
-    private var profileID: String { model.profile?.id ?? "" }
-
-    private var continueWatching: [ContinueItem] {
-        WatchHistory.continueWatching(allProgress.filter { $0.profileID == profileID }, titles: model.titles)
-            .map { ContinueItem(title: $0.title, entry: $0.entry) }
-    }
-
-    private var myList: [Title] {
-        allMyList.filter { $0.profileID == profileID }
-            .compactMap { entry in model.titles.first { $0.id == entry.titleID } }
-    }
-
-    /// Highest-rated titles, ranked by the best available critic score.
-    private var topRated: [RankedTitle] {
-        model.titles.filter { $0.criticScore != nil }
-            .sorted { ($0.criticScore ?? 0) > ($1.criticScore ?? 0) }
-            .prefix(10)
-            .enumerated()
-            .map { RankedTitle(rank: $0.offset + 1, title: $0.element) }
-    }
-
-    /// Genres with enough titles to make a row, largest first.
-    private var genreRows: [(genre: Genre, titles: [Title])] {
-        Genre.allCases
-            .map { genre in (genre, model.titles.filter { $0.genres.contains(genre) }) }
-            .filter { $0.1.count >= 3 }
-            .sorted { $0.1.count > $1.1.count }
-    }
 
     var body: some View {
         if model.titles.isEmpty {
             WelcomeView(isLibraryEmpty: model.library.titles.isEmpty)
         } else {
-            shelves
+            // My List's order comes from a query scoped to this profile; rebuilt when the profile changes.
+            HomeShelves(profileID: model.profile?.id ?? "")
+                .id(model.profile?.id)
         }
     }
+}
 
-    private var shelves: some View {
-        let continueItems = continueWatching
+/// What Home's rows are derived from. Each part is a cheap version number (or the My List
+/// order), so comparing keys never walks the library.
+private struct HomeRowsKey: Equatable {
+    let catalogVersion: Int
+    let historyVersion: Int
+    let myList: [String]
+}
+
+/// Home's derived rows, worked out once per change of `HomeRowsKey` rather than every render.
+private struct HomeRows {
+    let key: HomeRowsKey
+    let continueItems: [ContinueItem]
+    let recentlyWatched: [Title]
+    let myList: [Title]
+    let topRated: [RankedTitle]
+    let genres: [Genre]
+    let genreRows: [GenreRow]
+    /// Titles like the one most recently in progress.
+    let becauseYouWatched: [Title]
+
+    /// Titles shown in the Recently Watched row (See All opens the whole collection).
+    static let recentlyWatchedLimit = 20
+
+    @MainActor
+    init(_ key: HomeRowsKey, model: AppModel) {
+        self.key = key
+        let titles = model.titles
+        let byID = model.titleByID
+        // Each title's latest entry decides; a finished latest entry drops the title from the row.
+        var latest: [(titleID: String, entry: WatchProgress)] = []
+        latest.reserveCapacity(model.watchProgressByTitle.count)
+        for (titleID, entries) in model.watchProgressByTitle {
+            if let entry = entries.max(by: { $0.lastWatched < $1.lastWatched }) { latest.append((titleID, entry)) }
+        }
+        continueItems = latest.sorted { $0.entry.lastWatched > $1.entry.lastWatched }
+            .compactMap { item in
+                guard !item.entry.isFinished, let title = byID[item.titleID] else { return nil }
+                return ContinueItem(title: title, entry: item.entry)
+            }
+        // Same order as the Recently Watched collection: finished titles included, newest first.
+        recentlyWatched = Array(SmartCollection.recentlyWatched.titles(in: model).prefix(Self.recentlyWatchedLimit))
+        myList = key.myList.compactMap { byID[$0] }
+        topRated = titles.filter { $0.criticScore != nil }
+            .sorted { ($0.criticScore ?? 0) > ($1.criticScore ?? 0) }
+            .prefix(10)
+            .enumerated()
+            .map { RankedTitle(rank: $0.offset + 1, title: $0.element) }
+        // One pass over the library for every genre row and tile.
+        var byGenre: [Genre: [Title]] = [:]
+        for title in titles {
+            for genre in Set(title.genres) { byGenre[genre, default: []].append(title) }
+        }
+        genres = Genre.allCases.filter { byGenre[$0] != nil }
+        // Genres with enough titles to make a row, largest first.
+        genreRows = genres.compactMap { genre in byGenre[genre].map { GenreRow(genre: genre, titles: $0) } }
+            .filter { $0.titles.count >= 3 }
+            .sorted { $0.titles.count > $1.titles.count }
+        becauseYouWatched = continueItems.first.map { WatchHistory.similar(to: $0.title, in: titles) } ?? []
+    }
+}
+
+/// Home's rows, from the model's cached catalog and watch history. They're rebuilt only when
+/// the catalog, the watch history, or My List changes, not on every render (or every
+/// progress autosave a live entry makes).
+private struct HomeShelves: View {
+    @Environment(AppModel.self) private var model
+    /// This profile's My List, newest first.
+    @Query private var myListEntries: [MyListEntry]
+    @State private var cache: HomeRows?
+
+    init(profileID: String) {
+        _myListEntries = Query(filter: #Predicate<MyListEntry> { $0.profileID == profileID },
+                               sort: \.addedAt, order: .reverse)
+    }
+
+    var body: some View {
+        let key = HomeRowsKey(catalogVersion: model.catalogVersion, historyVersion: model.watchHistoryVersion,
+                              myList: myListEntries.map(\.titleID))
+        // Only a frame before onChange fills the cache works the rows out inline.
+        let rows = cache.flatMap { $0.key == key ? $0 : nil } ?? HomeRows(key, model: model)
+        let titles = model.titles
+
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 40) {
                 HeroCarousel(titles: model.featured)
                     .padding(.bottom, -24)
 
-                if !continueItems.isEmpty {
-                    Shelf(title: "Continue Watching", subtitle: "Pick up right where you left off", items: continueItems) { item in
+                if !rows.continueItems.isEmpty {
+                    Shelf(title: "Continue Watching", subtitle: "Pick up right where you left off", items: rows.continueItems) { item in
                         ContinueWatchingCard(title: item.title, entry: item.entry)
                     }
+                    .captionBelowArtwork(44)
                 }
 
-                posterShelf("Recently Added", Array(model.titles.prefix(12)), landscape: true,
-                            seeAll: { model.section = .recentlyAdded })
-
-                if topRated.count >= 3 {
-                    Shelf(title: "Top Rated in Your Library", items: topRated, spacing: 8) { ranked in
-                        Top10Card(rank: ranked.rank, title: ranked.title)
-                    }
-                }
-
-                if !myList.isEmpty {
-                    Shelf(title: "My List", items: myList, seeAll: { model.section = .myList }) { title in
+                if !rows.recentlyWatched.isEmpty {
+                    Shelf(title: "Recently Watched", items: rows.recentlyWatched,
+                          seeAll: { model.open(SmartCollection.recentlyWatched) }) { title in
                         PosterCard(title: title)
                     }
                 }
 
-                if let recent = continueItems.first?.title {
-                    posterShelf("Because You Watched \(recent.name)", WatchHistory.similar(to: recent, in: model.titles))
+                posterShelf("Recently Added", Array(titles.prefix(12)), landscape: true,
+                            seeAll: { model.section = .recentlyAdded })
+
+                if rows.topRated.count >= 3 {
+                    Shelf(title: "Top Rated in Your Library", items: rows.topRated, spacing: 8) { ranked in
+                        Top10Card(rank: ranked.rank, title: ranked.title)
+                    }
+                }
+
+                if !rows.myList.isEmpty {
+                    Shelf(title: "My List", items: rows.myList, seeAll: { model.section = .myList }) { title in
+                        PosterCard(title: title)
+                    }
+                }
+
+                if let recent = rows.continueItems.first?.title {
+                    posterShelf("Because You Watched \(recent.name)", rows.becauseYouWatched)
                 }
 
                 posterShelf("Movies", model.movies, seeAll: { model.section = .movies })
                 posterShelf("TV Shows", model.shows, seeAll: { model.section = .shows })
 
-                let genres = Genre.allCases.filter { genre in model.titles.contains { $0.genres.contains(genre) } }
-                if genres.count > 1 {
-                    Shelf(title: "Browse by Genre", items: genres) { genre in
+                if rows.genres.count > 1 {
+                    Shelf(title: "Browse by Genre", items: rows.genres) { genre in
                         GenreTile(genre: genre) { model.showGenre(genre) }
                     }
                 }
 
-                ForEach(genreRows, id: \.genre) { row in
+                ForEach(rows.genreRows) { row in
                     posterShelf(row.genre.shelfTitle, row.titles, seeAll: { model.showGenre(row.genre) })
                 }
             }
@@ -98,25 +157,36 @@ struct HomeView: View {
         }
         .ignoresSafeArea(edges: .top)
         .background { AppBackground() }
+        .onChange(of: key, initial: true) { _, key in
+            cache = HomeRows(key, model: model)
+        }
     }
 
     @ViewBuilder
-    private func posterShelf(_ title: String, subtitle: String? = nil, _ titles: [Title],
+    private func posterShelf(_ title: LocalizedStringResource, _ titles: [Title],
                              landscape: Bool = false, seeAll: (() -> Void)? = nil) -> some View {
         if !titles.isEmpty {
-            Shelf(title: title, subtitle: subtitle, items: titles, seeAll: seeAll) { item in
+            Shelf(title: title, items: titles, seeAll: seeAll) { item in
                 if landscape {
                     LandscapeCard(title: item, caption: item.subtitleLine.isEmpty ? item.kind.displayName : item.subtitleLine)
                 } else {
                     PosterCard(title: item)
                 }
             }
+            .captionBelowArtwork(landscape ? 24 : 0)
         }
     }
 }
 
+private struct GenreRow: Identifiable {
+    let genre: Genre
+    let titles: [Title]
+    var id: Genre { genre }
+}
+
 private extension Genre {
-    var shelfTitle: String {
+    /// Localizable, so a String Catalog can translate the row names.
+    var shelfTitle: LocalizedStringResource {
         switch self {
         case .action: "Action & Adventure"
         case .sciFi: "Mind-Bending Sci-Fi"
@@ -176,7 +246,7 @@ private struct WelcomeView: View {
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                         }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.theaterGlass)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {

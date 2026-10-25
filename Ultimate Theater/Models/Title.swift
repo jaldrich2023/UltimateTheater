@@ -180,6 +180,12 @@ struct Title: Identifiable, Hashable {
         ([yearText] + genres.prefix(2).map(\.displayName)).compactMap { $0 }.joined(separator: " · ")
     }
 
+    func episode(before episode: Episode) -> Episode? {
+        let episodes = allEpisodes
+        guard let index = episodes.firstIndex(of: episode), index > 0 else { return nil }
+        return episodes[index - 1]
+    }
+
     func episode(after episode: Episode) -> Episode? {
         let episodes = allEpisodes
         guard let index = episodes.firstIndex(of: episode), index + 1 < episodes.count else { return nil }

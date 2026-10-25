@@ -23,12 +23,15 @@ nonisolated struct TVmazeProvider: MetadataProvider {
     }
 
     func details(for candidate: MetadataCandidate, query: MetadataQuery) async throws -> MetadataRecord {
-        guard let showID = Int(candidate.externalID) else { throw MetadataError.badResponse }
+        guard let showID = MetadataIDs.numeric(candidate.externalID) else { throw MetadataError.badResponse }
         return try await show(id: showID)
     }
 
     func lookup(imdbID: String, query: MetadataQuery) async throws -> MetadataRecord? {
-        guard query.kind == .series, let url = URL(string: "\(Self.base)/lookup/shows?imdb=\(imdbID)") else { return nil }
+        guard query.kind == .series, MetadataIDs.isIMDb(imdbID) else { return nil }
+        var components = URLComponents(string: "\(Self.base)/lookup/shows")
+        components?.queryItems = [URLQueryItem(name: "imdb", value: imdbID)]
+        guard let url = components?.url else { return nil }
         // TVmaze answers a lookup with a redirect to the show, or 404 when unknown.
         guard let show = try? await HTTPClient.get(Show.self, from: url, provider: id) else { return nil }
         return try await self.show(id: show.id)
@@ -53,7 +56,7 @@ nonisolated struct TVmazeProvider: MetadataProvider {
         record.genres = show.genres ?? []
         record.cast = show.embedded?.cast?.prefix(8).map(\.person.name) ?? []
         record.studios = [show.network?.name, show.webChannel?.name].compactMap { $0 }
-        record.posterURL = show.image?.original.flatMap(URL.init(string:))
+        record.posterURL = show.image?.original.flatMap(ArtworkCache.webArtworkURL(string:))
         if let average = show.rating?.average {
             record.ratings = [ExternalRating(source: .tvmaze, score: average * 10, display: String(format: "%.1f", average))]
         }
@@ -65,7 +68,7 @@ nonisolated struct TVmazeProvider: MetadataProvider {
                 name: episode.name,
                 synopsis: MetadataText.plainText(episode.summary),
                 runtimeMinutes: episode.runtime,
-                stillURL: (episode.image?.original ?? episode.image?.medium).flatMap(URL.init(string:))
+                stillURL: (episode.image?.original ?? episode.image?.medium).flatMap(ArtworkCache.webArtworkURL(string:))
             )
         }
         record.backdropURL = try? await backdrop(for: showID)
@@ -76,7 +79,7 @@ nonisolated struct TVmazeProvider: MetadataProvider {
         guard let url = URL(string: "\(Self.base)/shows/\(showID)/images") else { return nil }
         let images = try await HTTPClient.get([ShowImage].self, from: url, provider: id)
         let background = images.first { $0.type == "background" && $0.main == true } ?? images.first { $0.type == "background" }
-        return background?.resolutions.original.flatMap { URL(string: $0.url) }
+        return background?.resolutions.original.flatMap { ArtworkCache.webArtworkURL(string: $0.url) }
     }
 
     private func candidate(from show: Show) -> MetadataCandidate {
@@ -87,7 +90,7 @@ nonisolated struct TVmazeProvider: MetadataProvider {
             year: MetadataText.year(in: show.premiered),
             kind: .series,
             overview: MetadataText.plainText(show.summary),
-            posterURL: (show.image?.medium ?? show.image?.original).flatMap(URL.init(string:))
+            posterURL: (show.image?.medium ?? show.image?.original).flatMap(ArtworkCache.webArtworkURL(string:))
         )
     }
 

@@ -17,15 +17,34 @@ enum BrowseSort: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// `ratings` (title ID → the viewer's score) is used by the My Rating order.
-    func apply(_ titles: [Title], ratings: [String: Double] = [:]) -> [Title] {
+    /// The direction each order starts in: A–Z ascending, everything else newest/highest first.
+    var defaultAscending: Bool { self == .alphabetical }
+
+    /// Labels for the two directions, in this order's terms.
+    var directionLabels: (ascending: String, descending: String) {
         switch self {
+        case .alphabetical: ("A to Z", "Z to A")
+        case .newest: ("Oldest First", "Newest First")
+        case .recentlyAdded: ("Oldest Added First", "Newest Added First")
+        case .rating, .myRating: ("Lowest First", "Highest First")
+        }
+    }
+
+    /// `ratings` (title ID → the viewer's score) is used by the My Rating order. With no
+    /// direction given, each order uses its default.
+    func apply(_ titles: [Title], ratings: [String: Double] = [:], ascending: Bool? = nil) -> [Title] {
+        let sorted: [Title] = switch self {
         case .myRating: titles.sorted { (ratings[$0.id] ?? -1) > (ratings[$1.id] ?? -1) }
         case .recentlyAdded: titles.sorted { $0.dateAdded > $1.dateAdded }
         case .alphabetical: titles.sorted { $0.sortName.localizedStandardCompare($1.sortName) == .orderedAscending }
-        case .newest: titles.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+        case .newest: titles.sorted { a, b in
+            (a.year ?? 0) != (b.year ?? 0) ? (a.year ?? 0) > (b.year ?? 0)
+                : a.sortName.localizedStandardCompare(b.sortName) == .orderedAscending
+        }
         case .rating: titles.sorted { ($0.criticScore ?? -1) > ($1.criticScore ?? -1) }
         }
+        guard let ascending, ascending != defaultAscending else { return sorted }
+        return sorted.reversed()
     }
 }
 
@@ -55,10 +74,18 @@ struct BrowseView: View {
             .background { AppBackground() }
         } else {
             FilterableTitleGrid(heading: kind == .movie ? "Movies" : "TV Shows", titles: source,
+                                profileID: model.profile?.id,
                                 addLabel: kind == .movie ? "Add Movies" : "Add TV Shows")
-                .id(kind) // Fresh filters per section.
+                // Fresh filters per section, and a ratings query per profile.
+                .id(GridIdentity(section: kind.rawValue, profileID: model.profile?.id))
         }
     }
+}
+
+/// Identity for a filterable grid: a fresh one (filters, ratings query) per section and profile.
+struct GridIdentity: Hashable {
+    let section: String
+    let profileID: String?
 }
 
 // MARK: - Recently Added
@@ -99,7 +126,9 @@ struct RecentlyAddedView: View {
                                            description: Text(tab == .rated
                                                 ? "Ratings appear after titles are identified by OMDb, TMDB, or TVmaze."
                                                 : "Add movies and shows to fill this page."))
-                        .padding(.top, 40)
+                        // Centered in the space below the header.
+                        .frame(maxWidth: .infinity)
+                        .containerRelativeFrame(.vertical) { height, _ in height * 0.75 }
                 } else {
                     LazyVStack(spacing: 28) {
                         ForEach(Array(titles.enumerated()), id: \.element.id) { offset, title in
@@ -120,21 +149,22 @@ private struct TitleRow: View {
     let title: Title
     let rank: Int?
     let tab: RecentlyAddedView.Tab
-    @State private var isInMyList = false
 
-    private var eyebrow: String {
+    /// Shown in capitals via `.textCase`, so translations keep their own casing rules.
+    private var eyebrow: Text {
         switch tab {
         case .added:
             let days = Calendar.current.dateComponents([.day], from: title.dateAdded, to: .now).day ?? 0
             return switch days {
-            case 0: "ADDED TODAY"
-            case 1: "ADDED YESTERDAY"
-            default: "ADDED \(days) DAYS AGO"
+            case 0: Text("Added today")
+            case 1: Text("Added yesterday")
+            default: Text("Added ^[\(days) day](inflect: true) ago")
             }
         case .released:
-            return title.yearText.map { "RELEASED \($0)" } ?? ""
+            return title.yearText.map { Text("Released \($0)") } ?? Text(verbatim: "")
         case .rated:
-            return title.criticScore.map { "\($0)% · \(title.ratings.first?.source.displayName.uppercased() ?? "")" } ?? ""
+            return title.criticScore.map { Text(verbatim: "\($0)% · \(title.ratings.first?.source.displayName ?? "")") }
+                ?? Text(verbatim: "")
         }
     }
 
@@ -157,7 +187,8 @@ private struct TitleRow: View {
             .titleContextMenu(title, model: model)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text(eyebrow)
+                eyebrow
+                    .textCase(.uppercase)
                     .font(.caption.weight(.heavy))
                     .tracking(1.2)
                     .foregroundStyle(Theme.accent)
@@ -177,23 +208,22 @@ private struct TitleRow: View {
                     }
                     .buttonStyle(PlayButtonStyle())
                     .disabled(!title.isPlayable)
+                    let isInMyList = model.isInMyList(title)
                     Button {
                         model.toggleMyList(title)
-                        isInMyList.toggle()
                     } label: {
                         Label(isInMyList ? "In My List" : "My List", systemImage: isInMyList ? "checkmark" : "plus")
                             .font(.headline)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 }
                 .padding(.top, 4)
             }
             .padding(.top, 6)
             Spacer(minLength: 0)
         }
-        .onAppear { isInMyList = model.isInMyList(title) }
     }
 }
 
@@ -201,14 +231,26 @@ private struct TitleRow: View {
 
 struct MyListView: View {
     @Environment(AppModel.self) private var model
-    @Query(sort: \MyListEntry.addedAt, order: .reverse) private var allMyList: [MyListEntry]
 
-    private var titles: [Title] {
-        allMyList.filter { $0.profileID == model.profile?.id }
-            .compactMap { entry in model.titles.first { $0.id == entry.titleID } }
+    var body: some View {
+        MyListGrid(profileID: model.profile?.id ?? "")
+            .id(model.profile?.id)
+    }
+}
+
+/// The saved titles, newest first, from a query scoped to one profile.
+private struct MyListGrid: View {
+    @Environment(AppModel.self) private var model
+    @Query private var entries: [MyListEntry]
+
+    init(profileID: String) {
+        _entries = Query(filter: #Predicate<MyListEntry> { $0.profileID == profileID },
+                         sort: \.addedAt, order: .reverse)
     }
 
     var body: some View {
+        let byID = model.titleByID
+        let titles = entries.compactMap { byID[$0.titleID] }
         Group {
             if titles.isEmpty {
                 ContentUnavailableView {
@@ -220,6 +262,7 @@ struct MyListView: View {
                         .buttonStyle(.glassProminent)
                         .tint(Theme.accent)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
@@ -270,9 +313,11 @@ struct SearchView: View {
         let matches = model.search(model.titles, for: model.searchText)
         if matches.isEmpty {
             ContentUnavailableView.search(text: model.searchText)
-                .padding(.top, 80)
+                .frame(maxWidth: .infinity)
+                .containerRelativeFrame(.vertical) { height, _ in height * 0.75 }
         } else {
-            PageHeader(title: "Results for “\(model.searchText)”", subtitle: "\(matches.count) titles")
+            PageHeader(title: Text("Results for “\(model.searchText)”"),
+                       subtitle: Text("^[\(matches.count) title](inflect: true)"))
             LazyVGrid(columns: posterGrid, spacing: 30) {
                 ForEach(matches) { GridPosterCard(title: $0) }
             }
@@ -284,8 +329,9 @@ struct SearchView: View {
     private func genreHub(_ genre: Genre) -> some View {
         var filter = TitleFilter()
         filter[.genre] = [genre.displayName]
-        return FilterableTitleGrid(heading: "Browse", titles: model.titles, filter: filter, sort: .alphabetical)
-            .id(genre)
+        return FilterableTitleGrid(heading: "Browse", titles: model.titles, profileID: model.profile?.id,
+                                   filter: filter, sort: .alphabetical)
+            .id(GridIdentity(section: genre.rawValue, profileID: model.profile?.id))
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     Button {
@@ -294,6 +340,7 @@ struct SearchView: View {
                         Label("All Genres", systemImage: "chevron.left")
                     }
                     .help("Back to all genres")
+                    .accessibilityLabel("All Genres")
                 }
             }
     }

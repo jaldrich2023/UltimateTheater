@@ -2,42 +2,34 @@
 //  Ultimate_TheaterUITests.swift
 //  Ultimate TheaterUITests
 //
-//  Created by John Aldrich on 10/21/26.
+//  Launch smoke test. The app is started in UI-test mode (the `-uitest` argument and the
+//  `UITEST` environment variable) so it uses scratch data instead of the user's library:
+//  in-memory stores, no Keychain, and no remote-control listener.
+//
+//  Caution: XCUIApplication terminates any running copy of the app before launching (the
+//  test and the app share one bundle ID), so quit a real viewing session first. These tests
+//  are skipped in the test plan's "Default" configuration and run in "Realtime".
 //
 
 import XCTest
 
 final class Ultimate_TheaterUITests: XCTestCase {
-
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
-    }
-
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+        // Opt-in, because launching quits a running copy of the app (see above).
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["UT_RUN_REALTIME_TESTS"] == "1",
+                          "UI tests run in the Realtime test plan configuration")
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testLaunchShowsAWindow() throws {
         let app = XCUIApplication()
+        app.launchArguments += ["-uitest"]
+        app.launchEnvironment["UITEST"] = "1"
         app.launch()
+        defer { app.terminate() }
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
-    }
-
-    @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
-        }
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "the app did not come to the foreground")
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared after launch")
     }
 }

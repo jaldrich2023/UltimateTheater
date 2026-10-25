@@ -130,6 +130,7 @@ final class MetadataService {
     let settings: MetadataSettings
 
     init(settings: MetadataSettings) {
+        if !AppEnvironment.isRunningTests { HTTPClient.purgeLegacyKeyedCacheIfNeeded() }
         self.settings = settings
     }
 
@@ -295,24 +296,29 @@ final class MetadataSettings {
     private static let autoFetchKey = "metadata.autoFetch"
 
     var enabledProviders: Set<MetadataProviderID> {
-        didSet { UserDefaults.standard.set(enabledProviders.map(\.rawValue), forKey: Self.enabledKey) }
+        didSet { defaults.set(enabledProviders.map(\.rawValue), forKey: Self.enabledKey) }
     }
 
     var autoFetch: Bool {
-        didSet { UserDefaults.standard.set(autoFetch, forKey: Self.autoFetchKey) }
+        didSet { defaults.set(autoFetch, forKey: Self.autoFetchKey) }
     }
 
     private var keys: [MetadataProviderID: String] = [:]
+    /// Where the choices are saved, and where the API keys are kept. Tests pass their own.
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let secrets: any SecretStore
 
-    init() {
-        if let stored = UserDefaults.standard.stringArray(forKey: Self.enabledKey) {
+    init(defaults: UserDefaults = .standard, secrets: any SecretStore = SystemKeychain()) {
+        self.defaults = defaults
+        self.secrets = secrets
+        if let stored = defaults.stringArray(forKey: Self.enabledKey) {
             enabledProviders = Set(stored.compactMap(MetadataProviderID.init(rawValue:)))
         } else {
             enabledProviders = Set(MetadataProviderID.allCases)
         }
-        autoFetch = UserDefaults.standard.object(forKey: Self.autoFetchKey) as? Bool ?? true
+        autoFetch = defaults.object(forKey: Self.autoFetchKey) as? Bool ?? true
         for id in MetadataProviderID.allCases where id.requiresAPIKey {
-            keys[id] = Keychain.string(for: id.rawValue)
+            keys[id] = try? secrets.read(account: id.rawValue, service: Keychain.apiKeyService)
         }
     }
 
@@ -320,10 +326,20 @@ final class MetadataSettings {
         keys[id]
     }
 
-    func setAPIKey(_ value: String, for id: MetadataProviderID) {
+    /// Saves (or with an empty value, removes) a source's key. Returns whether the Keychain
+    /// took it; when it didn't, the key in use stays the previous one, so the app never uses
+    /// a key that won't be there next launch.
+    @discardableResult
+    func setAPIKey(_ value: String, for id: MetadataProviderID) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        keys[id] = trimmed.isEmpty ? nil : trimmed
-        Keychain.set(trimmed.isEmpty ? nil : trimmed, for: id.rawValue)
+        let new = trimmed.isEmpty ? nil : trimmed
+        do {
+            try secrets.write(new, account: id.rawValue, service: Keychain.apiKeyService)
+        } catch {
+            return false
+        }
+        keys[id] = new
+        return true
     }
 
     /// Back to a fresh installation: every source on, automatic fetching on, no API keys.
@@ -355,11 +371,32 @@ final class MetadataSettings {
     }
 }
 
-/// Minimal generic-password Keychain wrapper for API keys and PINs.
-nonisolated enum Keychain {
-    static let apiKeyService = "UltimateTheater.MetadataAPIKeys"
+/// Where secrets (API keys, the administrator PIN's hash) are kept. Reading tells "nothing
+/// saved" (`nil`) apart from "couldn't read" (a thrown error), so callers can fail closed.
+nonisolated protocol SecretStore: Sendable {
+    func read(account: String, service: String) throws -> String?
+    /// Saves `value`, or removes the secret when it's `nil`. A failed save leaves any existing
+    /// secret as it was.
+    func write(_ value: String?, account: String, service: String) throws
+}
 
-    static func string(for account: String, service: String = apiKeyService) -> String? {
+nonisolated enum KeychainError: LocalizedError, Equatable {
+    case unexpectedStatus(OSStatus)
+    case unreadableData
+
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedStatus(let status):
+            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "error \(status)"
+            return "The Keychain couldn't be used (\(detail))."
+        case .unreadableData: return "A Keychain item couldn't be read."
+        }
+    }
+}
+
+/// The login Keychain (generic passwords). Items stay where earlier versions put them.
+nonisolated struct SystemKeychain: SecretStore {
+    func read(account: String, service: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -368,21 +405,57 @@ nonisolated enum Keychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data, let text = String(data: data, encoding: .utf8) else {
+                throw KeychainError.unreadableData
+            }
+            return text
+        case errSecItemNotFound: return nil
+        default: throw KeychainError.unexpectedStatus(status)
+        }
     }
 
-    static func set(_ value: String?, for account: String, service: String = apiKeyService) {
+    func write(_ value: String?, account: String, service: String) throws {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(base as CFDictionary)
-        guard let value, let data = value.data(using: .utf8) else { return }
-        var item = base
-        item[kSecValueData as String] = data
-        SecItemAdd(item as CFDictionary, nil)
+        guard let value else {
+            let status = SecItemDelete(base as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError.unexpectedStatus(status) }
+            return
+        }
+        let data = Data(value.utf8)
+        // Update in place, so a failure never leaves the account without its old secret.
+        let updated = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        switch updated {
+        case errSecSuccess: return
+        case errSecItemNotFound:
+            var item = base
+            item[kSecValueData as String] = data
+            let added = SecItemAdd(item as CFDictionary, nil)
+            guard added == errSecSuccess else { throw KeychainError.unexpectedStatus(added) }
+        default: throw KeychainError.unexpectedStatus(updated)
+        }
+    }
+}
+
+/// Minimal generic-password Keychain wrapper for API keys and PINs.
+nonisolated enum Keychain {
+    static let apiKeyService = "UltimateTheater.MetadataAPIKeys"
+
+    /// The saved value, or `nil` when there's none or it couldn't be read. Use
+    /// `SystemKeychain().read` where a read failure must be told apart (PINs).
+    static func string(for account: String, service: String = apiKeyService) -> String? {
+        try? SystemKeychain().read(account: account, service: service)
+    }
+
+    /// Saves (or with `nil`, removes) a value. Returns whether it worked.
+    @discardableResult
+    static func set(_ value: String?, for account: String, service: String = apiKeyService) -> Bool {
+        (try? SystemKeychain().write(value, account: account, service: service)) != nil
     }
 }

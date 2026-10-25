@@ -127,13 +127,14 @@ nonisolated enum FilenameParser {
     }
 
     /// "Season 4 Episode 22", "Season 4, Episode 22", "Series 2 Ep. 3", "S4 E22" (as whole words).
-    private static let spelledOutEpisode = /\b(?:season|series|s)[ ._-]*(\d{1,2})[ ._,-]*(?:episode|ep\.?|e)[ ._-]*(\d{1,3})(?![0-9])/.ignoresCase().wordBoundaryKind(.simple)
+    // Regex values aren't Sendable, but these are never mutated; matching only reads them.
+    nonisolated(unsafe) private static let spelledOutEpisode = /\b(?:season|series|s)[ ._-]*(\d{1,2})[ ._,-]*(?:episode|ep\.?|e)[ ._-]*(\d{1,3})(?![0-9])/.ignoresCase().wordBoundaryKind(.simple)
 
     /// "Episode 22" / "Ep. 22" / "E22" on its own (the season comes from the folder).
-    private static let spelledOutEpisodeOnly = /\b(?:episode|ep\.?|e)[ ._-]*(\d{1,3})(?![0-9])/.ignoresCase().wordBoundaryKind(.simple)
+    nonisolated(unsafe) private static let spelledOutEpisodeOnly = /\b(?:episode|ep\.?|e)[ ._-]*(\d{1,3})(?![0-9])/.ignoresCase().wordBoundaryKind(.simple)
 
     /// Release tags that mark the end of the human-readable title.
-    private static let releaseTag = /(?:2160p|1080p|1080i|720p|576p|480p|4k|uhd|hdr10\+?|hdr|dovi|bluray|blu-ray|bdrip|brrip|bdremux|remux|webrip|web-dl|webdl|hdtv|dvdrip|hdrip|x264|x265|h\.?264|h\.?265|hevc|avc|xvid|aac|ac3|eac3|ddp?5\.1|dts|atmos|truehd|10bit|repack|unrated|imax)(?![a-z0-9])/.ignoresCase()
+    nonisolated(unsafe) private static let releaseTag = /(?:2160p|1080p|1080i|720p|576p|480p|4k|uhd|hdr10\+?|hdr|dovi|bluray|blu-ray|bdrip|brrip|bdremux|remux|webrip|web-dl|webdl|hdtv|dvdrip|hdrip|x264|x265|h\.?264|h\.?265|hevc|avc|xvid|aac|ac3|eac3|ddp?5\.1|dts|atmos|truehd|10bit|repack|unrated|imax)(?![a-z0-9])/.ignoresCase()
 
     static func clean(_ raw: String) -> String {
         var text = raw.replacingOccurrences(of: "_", with: " ")

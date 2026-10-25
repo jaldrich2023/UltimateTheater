@@ -12,6 +12,7 @@ nonisolated final class ProgramStreamReader: PESReader {
     let size: UInt64
     private(set) var streams: [Int: ElementaryStreamInfo] = [:]
     var wantedStreams: Set<Int>?
+    var readLimit: UInt64?
 
     private let source: FileByteSource
     private var position: UInt64 = 0
@@ -37,7 +38,7 @@ nonisolated final class ProgramStreamReader: PESReader {
     }
 
     func nextPES() throws -> PESPacket? {
-        while position + 4 <= size {
+        while position + 4 <= min(size, readLimit ?? size) {
             let head = [UInt8](try source.read(at: position, count: 16))
             guard head.count >= 4 else { return nil }
             guard head[0] == 0, head[1] == 0, head[2] == 1 else {
@@ -70,11 +71,12 @@ nonisolated final class ProgramStreamReader: PESReader {
         return nil
     }
 
-    /// Skips forward to the next pack or PES start code.
+    /// Skips forward to the next pack or PES start code, scanning no further than `readLimit`.
     private func resynchronize() throws {
         position += 1
-        while position + 4 <= size {
-            let window = [UInt8](try source.read(at: position, count: 64 << 10))
+        let end = min(size, readLimit ?? size)
+        while position + 4 <= end {
+            let window = [UInt8](try source.read(at: position, count: Int(min(64 << 10, end - position))))
             guard window.count >= 4 else { break }
             for i in 0..<(window.count - 3) where window[i] == 0 && window[i + 1] == 0 && window[i + 2] == 1
                 && (window[i + 3] == 0xBA || window[i + 3] >= 0xBD) {
@@ -83,7 +85,9 @@ nonisolated final class ProgramStreamReader: PESReader {
             }
             position += UInt64(window.count - 3)
         }
-        position = size
+        // At the limit, stop where a start code split by it would begin, so raising the limit
+        // later finds it; at the end of the file, stop there.
+        position = end < size ? max(position, end - min(end, 3)) : size
     }
 
     private func packet(id: UInt8, at offset: UInt64, length: Int) throws -> PESPacket? {

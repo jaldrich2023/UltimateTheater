@@ -149,26 +149,65 @@ nonisolated enum MetadataError: LocalizedError, Equatable {
 // MARK: - HTTP
 
 nonisolated enum HTTPClient {
+    private static let headers = [
+        "User-Agent": "UltimateTheater/1.0 (macOS; personal media library)",
+        "Accept": "application/json",
+    ]
+
+    /// Keyless sources (TVmaze, Wikipedia): responses may be cached on disk.
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 20
         configuration.requestCachePolicy = .useProtocolCachePolicy
-        configuration.urlCache = URLCache(memoryCapacity: 8 << 20, diskCapacity: 64 << 20)
-        configuration.httpAdditionalHeaders = [
-            "User-Agent": "UltimateTheater/1.0 (macOS; personal media library)",
-            "Accept": "application/json",
-        ]
-        return URLSession(configuration: configuration)
+        let cache = URLCache(memoryCapacity: 8 << 20, diskCapacity: 64 << 20)
+        purgeOnce(cache)
+        configuration.urlCache = cache
+        configuration.httpAdditionalHeaders = headers
+        return URLSession(configuration: configuration, delegate: RedirectGuard.shared, delegateQueue: nil)
     }()
 
+    /// Sources whose requests carry an API key (TMDB, OMDb): nothing is cached, in memory or on
+    /// disk, so keys never end up in cache files.
+    static let keyedSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.httpAdditionalHeaders = headers
+        return URLSession(configuration: configuration, delegate: RedirectGuard.shared, delegateQueue: nil)
+    }()
+
+    private static let purgedKey = "metadata.keyedCachePurged"
+
+    /// Earlier versions cached keyed requests (with their API keys in the URLs) on disk.
+    /// Until that's been cleared, a cache is emptied before it's used.
+    private static func purgeOnce(_ cache: URLCache) {
+        guard !UserDefaults.standard.bool(forKey: purgedKey) else { return }
+        cache.removeAllCachedResponses()
+    }
+
+    /// Clears the cache earlier versions wrote keyed responses to (and the shared one), once.
+    /// Called at launch, so it doesn't wait for the first keyless request.
+    static func purgeLegacyKeyedCacheIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: purgedKey) else { return }
+        session.configuration.urlCache?.removeAllCachedResponses()
+        URLCache.shared.removeAllCachedResponses()
+        UserDefaults.standard.set(true, forKey: purgedKey)
+    }
+
+    /// `containsSecret`: the URL or headers carry an API key, so the response isn't cached.
     static func get<T: Decodable>(_ type: T.Type, from url: URL, headers: [String: String] = [:],
                                   keyStrategy: JSONDecoder.KeyDecodingStrategy = .useDefaultKeys,
+                                  containsSecret: Bool = false,
                                   provider: MetadataProviderID) async throws -> T {
+        guard url.scheme?.lowercased() == "https" else { throw MetadataError.badResponse }
         var request = URLRequest(url: url)
         for (field, value) in headers {
             request.setValue(value, forHTTPHeaderField: field)
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await (containsSecret ? keyedSession : session).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw MetadataError.badResponse }
         switch http.statusCode {
         case 200..<300: break
@@ -182,6 +221,53 @@ nonisolated enum HTTPClient {
         } catch {
             throw MetadataError.badResponse
         }
+    }
+}
+
+/// Redirects for metadata and subtitle requests: only to HTTPS, and credentials (API keys in
+/// headers, tokens, cookies) only ever go to the host the request was made to.
+nonisolated final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
+    static let shared = RedirectGuard()
+
+    /// Headers that identify the user or carry a key.
+    static let credentialHeaders = ["Authorization", "Api-Key", "Cookie", "Proxy-Authorization", "X-Api-Key"]
+
+    /// The request to follow for a redirect, or `nil` to refuse it. Same-host HTTPS redirects
+    /// are followed unchanged; other HTTPS hosts get the request without its credentials.
+    static func decision(for redirect: URLRequest, originalURL: URL?) -> URLRequest? {
+        guard let target = redirect.url, target.scheme?.lowercased() == "https", let host = target.host()?.lowercased() else {
+            return nil
+        }
+        guard host != originalURL?.host()?.lowercased() else { return redirect }
+        var stripped = redirect
+        for header in credentialHeaders {
+            stripped.setValue(nil, forHTTPHeaderField: header)
+        }
+        return stripped
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(Self.decision(for: request, originalURL: task.originalRequest?.url))
+    }
+}
+
+/// Checks provider IDs before they're put into URLs.
+nonisolated enum MetadataIDs {
+    /// "tt0133093".
+    static func isIMDb(_ id: String) -> Bool {
+        id.wholeMatch(of: /tt\d{1,10}/) != nil
+    }
+
+    /// A positive TMDB or TVmaze ID from its text form ("603"); nothing else.
+    static func numeric(_ id: String) -> Int? {
+        guard id.wholeMatch(of: /\d{1,10}/) != nil, let value = Int(id), value > 0 else { return nil }
+        return value
+    }
+
+    /// YouTube and Vimeo video keys.
+    static func isTrailerKey(_ key: String) -> Bool {
+        key.wholeMatch(of: /[A-Za-z0-9_-]{1,32}/) != nil
     }
 }
 

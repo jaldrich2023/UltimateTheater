@@ -13,6 +13,7 @@ enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
     case collections
     case recentlyAdded
     case myList
+    case statistics
     case library
     case search
 
@@ -26,6 +27,7 @@ enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case .collections: "Collections"
         case .recentlyAdded: "Recently Added"
         case .myList: "My List"
+        case .statistics: "Watch Stats"
         case .library: "Manage Library"
         case .search: "Search"
         }
@@ -39,6 +41,7 @@ enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case .collections: "square.stack.3d.up.fill"
         case .recentlyAdded: "clock.fill"
         case .myList: "plus.rectangle.on.rectangle"
+        case .statistics: "chart.bar.xaxis"
         case .library: "externaldrive.fill"
         case .search: "magnifyingglass"
         }
@@ -52,6 +55,7 @@ enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case .collections: "4"
         case .recentlyAdded: "5"
         case .myList: "6"
+        case .statistics: "8"
         case .library: "7"
         case .search: "f"
         }
@@ -62,6 +66,7 @@ enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
 enum AppRoute: Hashable {
     case title(Title)
     case collection(CollectionInfo)
+    case smartCollection(SmartCollection)
 }
 
 /// A movie collection and the library's movies in it, oldest first.
@@ -106,8 +111,10 @@ struct MovieCollection: Identifiable, Hashable {
     /// "3 movies" or "3 of 4 movies".
     var countDescription: String {
         let owned = movies.count
-        if totalCount > owned { return "\(owned) of \(totalCount) movies" }
-        return owned == 1 ? "1 movie" : "\(owned) movies"
+        let phrase = totalCount > owned
+            ? AttributedString(localized: "\(owned) of ^[\(totalCount) movie](inflect: true)")
+            : AttributedString(localized: "^[\(owned) movie](inflect: true)")
+        return String(phrase.characters)
     }
 
     /// "The Matrix" from "The Matrix Collection", for sorting and the A–Z index.
@@ -130,6 +137,26 @@ struct MovieCollection: Identifiable, Hashable {
     }
 }
 
+/// How the app was launched.
+enum AppEnvironment {
+    /// Unit tests run inside the app (TEST_HOST), or UI tests launched it (`-uitest` or
+    /// `UITEST=1`): no real databases, preferences, network, Keychain, or remote.
+    nonisolated static let isRunningTests: Bool = {
+        let process = ProcessInfo.processInfo
+        return process.environment["XCTestConfigurationFilePath"] != nil
+            || process.arguments.contains("-uitest")
+            || process.environment["UITEST"] == "1"
+    }()
+
+    /// Preferences used while testing, kept apart from the real ones.
+    nonisolated static let testDefaultsSuite = "com.ultimatetheater.tests"
+
+    /// The preferences an `AppModel` uses unless told otherwise.
+    static var defaultUserDefaults: UserDefaults {
+        isRunningTests ? (UserDefaults(suiteName: testDefaultsSuite) ?? .standard) : .standard
+    }
+}
+
 /// App-wide UI state: active profile, navigation, search, and playback.
 @Observable
 final class AppModel {
@@ -139,8 +166,22 @@ final class AppModel {
     /// Saved audio/subtitle choices per profile.
     let playbackPreferences = PlaybackPreferences()
 
+    /// Preferences this model reads and writes: `.standard` in the app, a separate suite
+    /// while tests run inside it.
+    @ObservationIgnored let defaults: UserDefaults
+    /// The persistent domain `resetEverything()` clears.
+    @ObservationIgnored private let defaultsDomain: String?
+
     /// The active viewer. `nil` shows the "Who's watching?" picker.
-    var profile: Profile?
+    var profile: Profile? {
+        didSet {
+            if oldValue?.id != profile?.id {
+                reloadWatchProgress()
+                reloadMyList()
+            }
+            if oldValue != profile { rebuildCatalog() }
+        }
+    }
 
     var section: SidebarSection = .home {
         didSet { if oldValue != section { path = [] } }
@@ -159,58 +200,190 @@ final class AppModel {
     var editingTitle: Title?
 
     private(set) var nowPlaying: PlaybackItem?
+    /// Changes with every play request, so asking for the same title again (Start Over, or
+    /// playing what's already in picture-in-picture) reloads the player at the new position.
+    private(set) var playRequest = 0
+    /// Where the picture-in-picture player docks in the sidebar, in window coordinates.
+    var pictureInPictureSlot: CGRect = .zero
+    /// The player shrunk to a floating picture-in-picture card while browsing.
+    private(set) var isPlayerMinimized = false
+    /// The playing engine, for controls outside the player (the Dock menu).
+    @ObservationIgnored weak var playerEngine: TheaterEngine?
+    /// Episode skips, Skip Intro/Credits, and close, for the iPhone remote and media keys.
+    @ObservationIgnored var playerControls: PlayerControlHooks?
     private(set) var startPosition: Double = 0
     /// Audio/subtitle choice made on the detail page for this play, if any.
     private(set) var startSelection: PlaybackSelection?
 
-    init(library: MediaLibrary) {
+    init(library: MediaLibrary, defaults: UserDefaults = AppEnvironment.defaultUserDefaults) {
         self.library = library
+        self.defaults = defaults
+        defaultsDomain = defaults === UserDefaults.standard ? Bundle.main.bundleIdentifier : AppEnvironment.testDefaultsSuite
+        ratingsCountry = defaults.string(forKey: RatingsRegion.key).flatMap { ContentRating.systems[$0] != nil ? $0 : nil }
+            ?? RatingsRegion.current
+        rebuildCatalog()
+        observeLibraryTitles()
     }
 
     var lastProfileID: String? {
-        UserDefaults.standard.string(forKey: Self.lastProfileKey)
+        defaults.string(forKey: Self.lastProfileKey)
     }
 
-    /// The library filtered by the active profile's rating limit.
-    var titles: [Title] {
-        guard let profile, profile.ratingLimit < .everything else { return library.titles }
-        let country = ratingsCountry
-        return library.titles.filter { profile.allows($0, country: country) }
+    /// The player fills the window (not docked in picture-in-picture), so browsing shortcuts
+    /// such as Return on a focused title are off.
+    var isPlayerFullWindow: Bool { nowPlaying != nil && !isPlayerMinimized }
+
+    /// Whether a bare Return may start the focused page's Play button: not while the player
+    /// fills the window, a PIN pad or a library sheet is open, or the search field is in use
+    /// (Return there submits the search).
+    var acceptsPlayReturnKey: Bool {
+        !isPlayerFullWindow && pinRequest == nil && !isSearchPresented && matchingTitle == nil && editingTitle == nil
     }
+
+    // MARK: Catalog
+
+    /// The library filtered by the active profile's rating limit. Stored (not computed per
+    /// render), and rebuilt when the library, profile, or ratings country changes.
+    private(set) var titles: [Title] = []
+    private(set) var movies: [Title] = []
+    private(set) var shows: [Title] = []
+    /// Movies grouped by their TMDB collection.
+    private(set) var collections: [MovieCollection] = []
+    /// Billboard picks: newest titles with real backdrop art, then anything recent.
+    private(set) var featured: [Title] = []
+    /// Every title the active profile may see, by ID.
+    private(set) var titleByID: [String: Title] = [:]
 
     /// The country whose rating authority decides what restricted profiles see.
-    var ratingsCountry: String = RatingsRegion.current {
-        didSet { UserDefaults.standard.set(ratingsCountry, forKey: RatingsRegion.key) }
+    var ratingsCountry: String = "US" {
+        didSet {
+            defaults.set(ratingsCountry, forKey: RatingsRegion.key)
+            if oldValue != ratingsCountry { rebuildCatalog() }
+        }
     }
 
-    /// Adding, removing, and editing library titles is limited to unrestricted profiles,
-    /// since the library manager lists every title.
-    var canManageLibrary: Bool { profile?.ratingLimit == .everything }
+    /// Bumped whenever the catalog is rebuilt, so views can compare one number instead of
+    /// whole title arrays.
+    private(set) var catalogVersion = 0
 
-    var movies: [Title] { titles.filter { $0.kind == .movie } }
-
-    /// Movies grouped by their TMDB collection.
-    var collections: [MovieCollection] {
-        Dictionary(grouping: movies.filter { $0.collection != nil }) { $0.collection!.id }
+    private func rebuildCatalog() {
+        defer { catalogVersion &+= 1 }
+        let all = library.titles
+        let visible: [Title]
+        if let profile, profile.ratingLimit < .everything {
+            let country = ratingsCountry
+            visible = all.filter { profile.allows($0, country: country) }
+        } else {
+            visible = all
+        }
+        let movies = visible.filter { $0.kind == .movie }
+        titles = visible
+        self.movies = movies
+        shows = visible.filter { $0.kind == .series }
+        collections = Dictionary(grouping: movies.filter { $0.collection != nil }) { $0.collection!.id }
             .compactMap { _, movies in
                 // Prefer the copy of the collection info that lists every film.
                 (movies.compactMap(\.collection).first { $0.parts != nil } ?? movies.first?.collection).map { info in
                     MovieCollection(info: info, movies: movies.sorted { ($0.year ?? 0) < ($1.year ?? 0) })
                 }
             }
+        let withArt = visible.filter { $0.backdropURL != nil }
+        featured = Array((withArt.isEmpty ? visible : withArt).prefix(5))
+        titleByID = Dictionary(visible.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
-    var shows: [Title] { titles.filter { $0.kind == .series } }
 
-    /// Billboard picks: newest titles with real backdrop art, then anything recent.
-    var featured: [Title] {
-        let withArt = titles.filter { $0.backdropURL != nil }
-        return Array((withArt.isEmpty ? titles : withArt).prefix(5))
+    /// Rebuilds the catalog whenever the library's titles change.
+    private func observeLibraryTitles() {
+        withObservationTracking {
+            _ = library.titles
+        } onChange: { [weak self] in
+            // Called before the change lands; rebuild once it has.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.rebuildCatalog()
+                self.observeLibraryTitles()
+            }
+        }
+    }
+
+    /// Adding, approving, removing, and editing library titles belongs to the household
+    /// administrator's profile alone.
+    var canManageLibrary: Bool { profile?.isAdministrator == true }
+
+    /// The household administrator's profile, if there is one.
+    var administratorProfile: Profile? { storedProfiles.first(where: \.isAdministrator) }
+
+    /// Runs a library-management action: only on the administrator's profile, and only after
+    /// the administrator PIN (when one is set) is entered for this action.
+    func manageLibrary(_ reason: String, in host: PINHost = .main, then action: @escaping () -> Void) {
+        guard canManageLibrary else { return }
+        requireAdministrator(reason, in: host, then: action)
+    }
+
+    /// Shows the Add Media file picker (after the administrator PIN).
+    func addMedia(in host: PINHost = .main) {
+        manageLibrary("Enter the administrator PIN to add movies and shows.", in: host) { [weak self] in
+            self?.isImporterPresented = true
+        }
+    }
+
+    /// Adds dropped files or folders (after the administrator PIN).
+    func importDropped(_ urls: [URL]) {
+        manageLibrary("Enter the administrator PIN to add movies and shows.") { [weak self] in
+            guard let self else { return }
+            Task { await self.library.importMedia(from: urls) }
+        }
+    }
+
+    func rescanLibraryFolders(in host: PINHost = .main) {
+        manageLibrary("Enter the administrator PIN to rescan the library folders.", in: host) { [weak self] in
+            guard let self else { return }
+            Task { await self.library.rescanFolders() }
+        }
+    }
+
+    /// Re-fetches info for these titles, or for everything when `ids` is nil.
+    func refreshInfo(for ids: [String]? = nil, in host: PINHost = .main) {
+        if let ids, ids.isEmpty { return }
+        let reason = ids?.count == 1 ? "Enter the administrator PIN to refresh this title's info."
+            : "Enter the administrator PIN to refresh info."
+        manageLibrary(reason, in: host) { [weak self] in
+            guard let self else { return }
+            Task { await self.library.refreshMetadata(for: ids, force: true) }
+        }
+    }
+
+    func fixMatch(_ title: Title) {
+        manageLibrary("Enter the administrator PIN to fix the match for “\(title.name)”.") { [weak self] in
+            self?.matchingTitle = title
+        }
+    }
+
+    func editInfo(_ title: Title) {
+        manageLibrary("Enter the administrator PIN to edit “\(title.name)”.") { [weak self] in
+            self?.editingTitle = title
+        }
+    }
+
+    /// Whether another profile already holds the administrator role.
+    func hasOtherAdministrator(than id: String?) -> Bool {
+        storedProfiles.contains { $0.isAdministrator && $0.id != id }
     }
 
     // MARK: PINs
 
     /// The PIN prompt currently shown over the app.
     var pinRequest: PINRequest?
+    /// The window showing `pinRequest`.
+    private(set) var pinHost: PINHost = .main
+
+    /// Where a PIN prompt appears.
+    enum PINHost {
+        /// Over the main window.
+        case main
+        /// Over the Settings window.
+        case settings
+    }
 
     private static let lockedLimitKey = "profiles.lockedRatingLimit"
 
@@ -218,30 +391,35 @@ final class AppModel {
     /// administrator PIN is entered, so logging out (or relaunching) doesn't lift it.
     private var lockedLimit: RatingLimit? {
         get {
-            UserDefaults.standard.object(forKey: Self.lockedLimitKey) == nil ? nil
-                : RatingLimit(rawValue: UserDefaults.standard.integer(forKey: Self.lockedLimitKey))
+            defaults.object(forKey: Self.lockedLimitKey) == nil ? nil
+                : RatingLimit(rawValue: defaults.integer(forKey: Self.lockedLimitKey))
         }
         set {
-            if let newValue { UserDefaults.standard.set(newValue.rawValue, forKey: Self.lockedLimitKey) }
-            else { UserDefaults.standard.removeObject(forKey: Self.lockedLimitKey) }
+            if let newValue { defaults.set(newValue.rawValue, forKey: Self.lockedLimitKey) }
+            else { defaults.removeObject(forKey: Self.lockedLimitKey) }
         }
     }
 
     /// Opens a profile, asking for the administrator PIN when it's less restricted than the
     /// current (or last restricted) profile, and for its own PIN when it has one.
-    func requestOpen(_ target: Profile) {
+    func requestOpen(_ target: Profile, in host: PINHost = .main) {
         var steps: [PINRequest] = []
         let ceiling = profile?.ratingLimit ?? lockedLimit
         if let ceiling, target.ratingLimit > ceiling, AdministratorPIN.isSet {
             steps.append(PINRequest(title: "Administrator PIN", message: "\(target.name) can watch more mature titles. Enter the administrator PIN to continue.",
                                     profile: target, kind: .verify(AdministratorPIN.verify), completion: { _ in }))
         }
+        if target.isAdministrator, AdministratorPIN.isSet, profile?.id != target.id, steps.isEmpty {
+            steps.append(PINRequest(title: "Administrator PIN", message: "Enter the administrator PIN to open \(target.name).",
+                                    profile: target, kind: .verify(AdministratorPIN.verify), completion: { _ in }))
+        }
         if target.hasPIN {
             let id = target.id
             steps.append(PINRequest(title: "Enter \(target.name)'s PIN", message: "This profile is locked.", profile: target,
-                                    kind: .verify { [weak self] in self?.verifyPIN($0, profileID: id) ?? false }, completion: { _ in }))
+                                    kind: .verify { [weak self] in self?.verifyPIN($0, profileID: id) ?? false },
+                                    lockoutTargets: [.profile(id)], completion: { _ in }))
         }
-        runPINSteps(steps) { [weak self] in self?.select(target) }
+        runPINSteps(steps, in: host) { [weak self] in self?.select(target) }
     }
 
     func requestSwitch(to target: Profile) {
@@ -249,22 +427,30 @@ final class AppModel {
     }
 
     /// Runs an action that only the household administrator may perform.
-    func requireAdministrator(_ reason: String, then action: @escaping () -> Void) {
+    func requireAdministrator(_ reason: String, in host: PINHost = .main, then action: @escaping () -> Void) {
         guard AdministratorPIN.isSet else { return action() }
         runPINSteps([PINRequest(title: "Administrator PIN", message: reason, profile: nil,
-                                kind: .verify(AdministratorPIN.verify), completion: { _ in })], then: action)
+                                kind: .verify(AdministratorPIN.verify), completion: { _ in })], in: host, then: action)
     }
 
     /// Asks for a new PIN (entered twice) and hands it to `completion`.
     func requestNewPIN(title: String, message: String, profile: Profile? = nil, completion: @escaping (String) -> Void) {
+        pinHost = .main
         pinRequest = PINRequest(title: title, message: message, profile: profile, kind: .create, completion: completion)
     }
 
-    private func runPINSteps(_ steps: [PINRequest], then done: @escaping () -> Void) {
+    /// Dismisses a prompt left over a window that closed.
+    func cancelPINRequest(in host: PINHost) {
+        if pinHost == host { pinRequest = nil }
+    }
+
+    private func runPINSteps(_ steps: [PINRequest], in host: PINHost = .main, then done: @escaping () -> Void) {
         guard let first = steps.first else { return done() }
         let rest = Array(steps.dropFirst())
-        pinRequest = PINRequest(title: first.title, message: first.message, profile: first.profile, kind: first.kind) { [weak self] _ in
-            self?.runPINSteps(rest, then: done)
+        pinHost = host
+        pinRequest = PINRequest(title: first.title, message: first.message, profile: first.profile, kind: first.kind,
+                                lockoutTargets: first.lockoutTargets) { [weak self] _ in
+            self?.runPINSteps(rest, in: host, then: done)
         }
     }
 
@@ -302,15 +488,18 @@ final class AppModel {
             (hasAdministrator && AdministratorPIN.verify(pin))
                 || (target.hasPIN && (self?.verifyPIN(pin, profileID: id) ?? false))
         }
+        var targets: Set<PINLockoutTarget> = []
+        if hasAdministrator { targets.insert(.administrator) }
+        if target.hasPIN { targets.insert(.profile(id)) }
         runPINSteps([PINRequest(title: "Remove \(target.name)", message: message, profile: target,
-                                kind: .verify(verify), completion: { _ in })]) { [weak self] in
+                                kind: .verify(verify), lockoutTargets: targets, completion: { _ in })]) { [weak self] in
             self?.deleteProfile(target)
             done()
         }
     }
 
     func select(_ profile: Profile) {
-        UserDefaults.standard.set(profile.id, forKey: Self.lastProfileKey)
+        defaults.set(profile.id, forKey: Self.lastProfileKey)
         recordUse(of: profile.id)
         lockedLimit = profile.ratingLimit < .everything ? profile.ratingLimit : nil
         withAnimation(.smooth(duration: 0.45)) {
@@ -322,6 +511,8 @@ final class AppModel {
     }
 
     func signOut() {
+        // Saves where playback (perhaps in picture-in-picture) got to before the profile goes.
+        if nowPlaying != nil { closePlayerSavingProgress() }
         withAnimation(.smooth(duration: 0.45)) {
             nowPlaying = nil
             profile = nil
@@ -332,8 +523,19 @@ final class AppModel {
         path.append(.title(title))
     }
 
+    /// When a title plays to the end, the player closes onto that title's page.
+    func finishPlayback(of title: Title) {
+        stopPlayback()
+        if case .title(let shown) = path.last, shown.id == title.id { return }
+        open(title)
+    }
+
     func open(_ collection: CollectionInfo) {
         path.append(.collection(collection))
+    }
+
+    func open(_ collection: SmartCollection) {
+        path.append(.smartCollection(collection))
     }
 
     /// Returns to the root after a title is removed from the library.
@@ -350,22 +552,30 @@ final class AppModel {
         selectedGenre = genre
     }
 
-    func addMedia() {
-        isImporterPresented = true
-    }
-
     func play(_ item: PlaybackItem, from position: Double = 0, selection: PlaybackSelection? = nil) {
         startPosition = position
         startSelection = selection
+        playRequest += 1
         withAnimation(.easeInOut(duration: 0.35)) {
             nowPlaying = item
+            isPlayerMinimized = false
         }
     }
 
     func stopPlayback() {
         withAnimation(.easeInOut(duration: 0.35)) {
             nowPlaying = nil
+            isPlayerMinimized = false
         }
+    }
+
+    /// Shrinks the player to picture-in-picture; playback continues while browsing.
+    func minimizePlayer() {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { isPlayerMinimized = true }
+    }
+
+    func expandPlayer() {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { isPlayerMinimized = false }
     }
 
     // MARK: Watch history & My List
@@ -373,7 +583,139 @@ final class AppModel {
     /// Set at launch so lightweight views (cards, context menus) can act on watch
     /// history without each owning a `@Query`.
     var modelContext: ModelContext? {
-        didSet { loadProfiles() }
+        didSet {
+            loadProfiles()
+            observeWatchHistory()
+        }
+    }
+
+    /// The active profile's watch history grouped by title, so every card and menu can show
+    /// watched state without its own query. Entries are live models, so position updates show
+    /// up without touching this dictionary; it only changes when entries are added or removed.
+    private(set) var watchProgressByTitle: [String: [WatchProgress]] = [:] {
+        didSet { watchHistoryVersion &+= 1 }
+    }
+    /// Bumped whenever watch history is reloaded or refreshed, so views can cache rows
+    /// derived from it.
+    private(set) var watchHistoryVersion = 0
+    /// Titles on the active profile's My List.
+    private(set) var myListIDs: Set<String> = []
+    @ObservationIgnored private var watchHistoryObserver: Task<Void, Never>?
+    @ObservationIgnored private var historyRefresh: Task<Void, Never>?
+    @ObservationIgnored private var pendingRefresh: (progress: Bool, myList: Bool) = (false, false)
+    /// Every loaded progress entry, for spotting additions and removals.
+    @ObservationIgnored private var loadedProgressIDs: Set<PersistentIdentifier> = []
+
+    /// Reloads the whole watch history for the active profile.
+    func reloadWatchProgress() {
+        guard let profile, let modelContext else {
+            watchProgressByTitle = [:]
+            loadedProgressIDs = []
+            return
+        }
+        let profileID = profile.id
+        let entries = (try? modelContext.fetch(FetchDescriptor<WatchProgress>(predicate: #Predicate {
+            $0.profileID == profileID
+        }))) ?? []
+        watchProgressByTitle = Dictionary(grouping: entries, by: \.titleID)
+        loadedProgressIDs = Set(entries.map(\.persistentModelID))
+    }
+
+    /// Applies only the additions and removals since the last load, touching just the
+    /// affected titles (and nothing at all when entries were only updated in place).
+    private func refreshWatchProgress() {
+        guard let profile, let modelContext else { return reloadWatchProgress() }
+        let profileID = profile.id
+        guard let current = try? modelContext.fetchIdentifiers(FetchDescriptor<WatchProgress>(predicate: #Predicate {
+            $0.profileID == profileID
+        })) else { return reloadWatchProgress() }
+        let currentIDs = Set(current)
+        let added = currentIDs.subtracting(loadedProgressIDs)
+        let removed = loadedProgressIDs.subtracting(currentIDs)
+        guard !added.isEmpty || !removed.isEmpty else { return }
+        var updated = watchProgressByTitle
+        if !removed.isEmpty {
+            for (titleID, entries) in updated where entries.contains(where: { removed.contains($0.persistentModelID) }) {
+                let kept = entries.filter { !removed.contains($0.persistentModelID) }
+                updated[titleID] = kept.isEmpty ? nil : kept
+            }
+        }
+        for id in added {
+            guard let entry = modelContext.model(for: id) as? WatchProgress else { return reloadWatchProgress() }
+            updated[entry.titleID, default: []].append(entry)
+        }
+        watchProgressByTitle = updated
+        loadedProgressIDs = currentIDs
+    }
+
+    private func reloadMyList() {
+        guard let profile, let modelContext else {
+            myListIDs = []
+            return
+        }
+        let profileID = profile.id
+        let entries = (try? modelContext.fetch(FetchDescriptor<MyListEntry>(predicate: #Predicate {
+            $0.profileID == profileID
+        }))) ?? []
+        let ids = Set(entries.map(\.titleID))
+        if ids != myListIDs { myListIDs = ids }
+    }
+
+    private func observeWatchHistory() {
+        watchHistoryObserver?.cancel()
+        reloadWatchProgress()
+        reloadMyList()
+        guard modelContext != nil else { return }
+        watchHistoryObserver = Task { [weak self] in
+            for await note in NotificationCenter.default.notifications(named: ModelContext.didSave) {
+                guard let self else { return }
+                // Only the users store holds watch history.
+                guard let context = note.object as? ModelContext, context === self.modelContext else { continue }
+                let changed = Self.changedEntities(in: note)
+                self.scheduleHistoryRefresh(progress: changed?.contains("WatchProgress") ?? true,
+                                            myList: changed?.contains("MyListEntry") ?? true)
+            }
+        }
+    }
+
+    /// The model types a save touched, or nil when the notification doesn't say.
+    private static func changedEntities(in note: Notification) -> Set<String>? {
+        guard let info = note.userInfo else { return nil }
+        let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+        var found = false
+        var names = Set<String>()
+        for key in keys {
+            let value = info[key.rawValue]
+            if let ids = value as? [PersistentIdentifier] {
+                found = true
+                names.formUnion(ids.map(\.entityName))
+            } else if let ids = value as? Set<PersistentIdentifier> {
+                found = true
+                names.formUnion(ids.map(\.entityName))
+            }
+        }
+        return found ? names : nil
+    }
+
+    /// Coalesces bursts of saves (progress autosaves, a season marked watched) into one refresh.
+    private func scheduleHistoryRefresh(progress: Bool, myList: Bool) {
+        guard progress || myList else { return }
+        pendingRefresh.progress = pendingRefresh.progress || progress
+        pendingRefresh.myList = pendingRefresh.myList || myList
+        historyRefresh?.cancel()
+        historyRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self else { return }
+            let pending = self.pendingRefresh
+            self.pendingRefresh = (false, false)
+            if pending.progress {
+                self.refreshWatchProgress()
+                // Positions and last-watched dates change in place; rows ordered by them
+                // (Continue Watching) need rebuilding too.
+                self.watchHistoryVersion &+= 1
+            }
+            if pending.myList { self.reloadMyList() }
+        }
     }
 
     // MARK: Profiles
@@ -388,15 +730,23 @@ final class AppModel {
     private func loadProfiles() {
         migrateLegacyProfiles()
         let descriptor = FetchDescriptor<StoredProfile>(sortBy: [SortDescriptor(\.dateCreated)])
-        storedProfiles = ((try? modelContext?.fetch(descriptor)) ?? []).map { Profile($0) }
+        let stored = (try? modelContext?.fetch(descriptor)) ?? []
+        // Households from before the administrator role: the oldest unrestricted profile takes it.
+        if !stored.isEmpty, !stored.contains(where: \.isAdministrator),
+           let first = stored.first(where: { $0.ratingLimitRaw == RatingLimit.everything.rawValue }) ?? stored.first {
+            first.isAdministrator = true
+            first.ratingLimitRaw = RatingLimit.everything.rawValue
+            try? modelContext?.save()
+        }
+        storedProfiles = stored.map { Profile($0) }
     }
 
     /// Earlier versions came with four fixed profiles. Any of them with watch history,
     /// My List entries, or ratings becomes a saved profile so that history isn't lost.
     private func migrateLegacyProfiles() {
         let key = "profiles.migratedLegacy"
-        guard let modelContext, !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
+        guard let modelContext, !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
         let existing = Set(((try? modelContext.fetch(FetchDescriptor<StoredProfile>())) ?? []).map(\.id))
         var used = Set(((try? modelContext.fetch(FetchDescriptor<WatchProgress>())) ?? []).map(\.profileID))
         used.formUnion(((try? modelContext.fetch(FetchDescriptor<MyListEntry>())) ?? []).map(\.profileID))
@@ -424,14 +774,26 @@ final class AppModel {
             existing.paletteIndex = draft.paletteIndex
             existing.ratingLimitRaw = draft.ratingLimit.rawValue
             existing.allowsUnrated = allowsUnrated
+            // The household always keeps one administrator.
+            existing.isAdministrator = draft.isAdministrator || !hasOtherAdministrator(than: existing.id)
             stored = existing
         } else {
             guard canAddProfile else { return nil }
             stored = StoredProfile(name: trimmed, symbol: draft.symbol, paletteIndex: draft.paletteIndex,
                                    ratingLimit: draft.ratingLimit, allowsUnrated: allowsUnrated)
+            // The first profile is the administrator.
+            stored.isAdministrator = draft.isAdministrator || !hasOtherAdministrator(than: nil)
             modelContext.insert(stored)
         }
         stored.imageData = draft.imageData
+        if stored.isAdministrator {
+            // The administrator manages every title, so it can't be content-restricted.
+            stored.ratingLimitRaw = RatingLimit.everything.rawValue
+            stored.allowsUnrated = true
+            for other in (try? modelContext.fetch(FetchDescriptor<StoredProfile>())) ?? [] where other.id != stored.id {
+                other.isAdministrator = false
+            }
+        }
         switch draft.pinChange {
         case .unchanged: break
         case .set(let pin): stored.pinHash = PINHash.make(pin)
@@ -458,17 +820,22 @@ final class AppModel {
             try? modelContext.delete(model: WatchProgress.self)
             try? modelContext.delete(model: MyListEntry.self)
             try? modelContext.delete(model: UserRating.self)
+            try? modelContext.delete(model: SceneBookmark.self)
             try? modelContext.delete(model: StoredProfile.self)
             try? modelContext.save()
         }
+        library.cancelSkipAnalysis()
         try? library.context.delete(model: MediaEpisode.self)
         try? library.context.delete(model: MediaItem.self)
         try? library.context.delete(model: LibraryFolder.self)
+        try? library.context.delete(model: PendingMedia.self)
         try? library.context.save()
-        if let bundleID = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: bundleID)
+        if let defaultsDomain {
+            defaults.removePersistentDomain(forName: defaultsDomain)
         }
         library.metadata.settings.reset()
+        OpenSubtitlesSettings.shared.reset()
+        ExternalSubtitleLibrary.removeAll()
         AdministratorPIN.set(nil)
         pinRequest = nil
         playbackPreferences.removeAll()
@@ -486,9 +853,10 @@ final class AppModel {
         try? modelContext.delete(model: WatchProgress.self, where: #Predicate { $0.profileID == id })
         try? modelContext.delete(model: MyListEntry.self, where: #Predicate { $0.profileID == id })
         try? modelContext.delete(model: UserRating.self, where: #Predicate { $0.profileID == id })
+        try? modelContext.delete(model: SceneBookmark.self, where: #Predicate { $0.profileID == id })
         try? modelContext.save()
         playbackPreferences.removeAll(forProfile: id)
-        if lastProfileID == id { UserDefaults.standard.removeObject(forKey: Self.lastProfileKey) }
+        if lastProfileID == id { defaults.removeObject(forKey: Self.lastProfileKey) }
         if profile?.id == id { signOut() }
         loadProfiles()
     }
@@ -506,11 +874,52 @@ final class AppModel {
         play(resume.item, from: resume.position)
     }
 
+    func isWatched(_ title: Title) -> Bool {
+        WatchHistory.isWatched(title, in: watchProgressByTitle[title.id] ?? [])
+    }
+
+    /// How far into an unfinished movie this profile is (0…1), for poster progress bars.
+    func partialProgress(_ title: Title) -> Double? {
+        WatchHistory.partialProgress(title, in: watchProgressByTitle[title.id] ?? [])
+    }
+
+    /// Whether this profile has finished one episode.
+    func isWatched(_ episode: Episode, of show: Title) -> Bool {
+        watchProgressByTitle[show.id]?.contains { $0.playbackID == episode.id && $0.isFinished } ?? false
+    }
+
+    /// Clears this profile's progress for a title, taking it off Continue Watching.
+    func removeFromContinueWatching(_ title: Title) {
+        guard let profile, let modelContext else { return }
+        withAnimation(.snappy) {
+            WatchHistory.removeFromContinueWatching(title, profileID: profile.id, in: modelContext)
+            try? modelContext.save()
+            refreshWatchProgress()
+        }
+    }
+
+    /// Tags a title as watched or unwatched for this profile.
+    func setWatched(_ watched: Bool, _ title: Title) {
+        guard let profile, let modelContext else { return }
+        withAnimation(.snappy) {
+            WatchHistory.setWatched(watched, title, profileID: profile.id, in: modelContext)
+            try? modelContext.save()
+            refreshWatchProgress()
+        }
+    }
+
+    /// Tags individual episodes (one, or a whole season) as watched or unwatched for this profile.
+    func setWatched(_ watched: Bool, episodes: [Episode], of show: Title) {
+        guard let profile, let modelContext else { return }
+        withAnimation(.snappy) {
+            WatchHistory.setWatched(watched, episodes: episodes, of: show, profileID: profile.id, in: modelContext)
+            try? modelContext.save()
+            refreshWatchProgress()
+        }
+    }
+
     func isInMyList(_ title: Title) -> Bool {
-        guard let profile, let modelContext else { return false }
-        let key = "\(profile.id)|\(title.id)"
-        let count = (try? modelContext.fetchCount(FetchDescriptor<MyListEntry>(predicate: #Predicate { $0.key == key }))) ?? 0
-        return count > 0
+        myListIDs.contains(title.id)
     }
 
     func toggleMyList(_ title: Title) {
@@ -519,6 +928,7 @@ final class AppModel {
         let entries = (try? modelContext.fetch(FetchDescriptor<MyListEntry>(predicate: #Predicate { $0.key == key }))) ?? []
         withAnimation(.snappy) {
             WatchHistory.toggleMyList(title, profileID: profile.id, entries: entries, in: modelContext)
+            if myListIDs.contains(title.id) { myListIDs.remove(title.id) } else { myListIDs.insert(title.id) }
         }
     }
 
@@ -613,6 +1023,68 @@ enum WatchHistory {
         } else {
             context.insert(WatchProgress(profileID: profileID, titleID: item.title.id, playbackID: item.id,
                                          position: position, duration: duration))
+        }
+    }
+
+    /// Whether a title counts as watched: a finished movie, or a show whose every episode is finished.
+    static func isWatched(_ title: Title, in progress: [WatchProgress]) -> Bool {
+        let finished = Set(progress.filter { $0.titleID == title.id && $0.isFinished }.map(\.playbackID))
+        switch title.kind {
+        case .movie: return finished.contains(title.id)
+        case .series: return !title.allEpisodes.isEmpty && title.allEpisodes.allSatisfy { finished.contains($0.id) }
+        }
+    }
+
+    /// How far into an unfinished movie the viewer is (0…1), for poster progress bars.
+    static func partialProgress(_ title: Title, in progress: [WatchProgress]) -> Double? {
+        guard title.kind == .movie,
+              let entry = progress.first(where: { $0.titleID == title.id && $0.playbackID == title.id }),
+              !entry.isFinished, entry.position > 10 else { return nil }
+        return entry.fraction
+    }
+
+    /// Tags a title (every episode, for a show) as watched, or clears its history.
+    static func setWatched(_ watched: Bool, _ title: Title, profileID: String, in context: ModelContext) {
+        guard watched else {
+            removeFromContinueWatching(title, profileID: profileID, in: context)
+            return
+        }
+        let items: [(id: String, minutes: Int)] = title.kind == .movie
+            ? [(title.id, title.runtimeMinutes)]
+            : title.allEpisodes.map { ($0.id, $0.runtimeMinutes) }
+        for item in items {
+            let key = WatchProgress.key(profileID: profileID, playbackID: item.id)
+            let existing = try? context.fetch(FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.key == key })).first
+            let duration = max(existing?.duration ?? 0, Double(item.minutes * 60), 1)
+            if let existing {
+                existing.duration = duration
+                existing.position = duration
+                existing.lastWatched = .now
+            } else {
+                context.insert(WatchProgress(profileID: profileID, titleID: title.id, playbackID: item.id,
+                                             position: duration, duration: duration))
+            }
+        }
+    }
+
+    /// Tags specific episodes of a show as watched, or clears just their history.
+    static func setWatched(_ watched: Bool, episodes: [Episode], of show: Title, profileID: String, in context: ModelContext) {
+        for episode in episodes {
+            let key = WatchProgress.key(profileID: profileID, playbackID: episode.id)
+            let existing = try? context.fetch(FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.key == key })).first
+            guard watched else {
+                if let existing { context.delete(existing) }
+                continue
+            }
+            let duration = max(existing?.duration ?? 0, Double(episode.runtimeMinutes * 60), 1)
+            if let existing {
+                existing.duration = duration
+                existing.position = duration
+                existing.lastWatched = .now
+            } else {
+                context.insert(WatchProgress(profileID: profileID, titleID: show.id, playbackID: episode.id,
+                                             position: duration, duration: duration))
+            }
         }
     }
 

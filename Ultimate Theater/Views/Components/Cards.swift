@@ -44,11 +44,18 @@ extension View {
             } else {
                 Button("Add to My List", systemImage: "plus") { model.toggleMyList(title) }
             }
-            Divider()
-            Button("Fix Match…", systemImage: "wand.and.stars") { model.matchingTitle = title }
-            Button("Edit Info…", systemImage: "pencil") { model.editingTitle = title }
-            Button("Show in Finder", systemImage: "folder") {
-                model.library.revealInFinder(title.allEpisodes.first?.id ?? title.id)
+            if model.isWatched(title) {
+                Button("Mark as Unwatched", systemImage: "eye.slash") { model.setWatched(false, title) }
+            } else {
+                Button("Mark as Watched", systemImage: "checkmark.circle") { model.setWatched(true, title) }
+            }
+            if model.canManageLibrary {
+                Divider()
+                Button("Fix Match…", systemImage: "wand.and.stars") { model.fixMatch(title) }
+                Button("Edit Info…", systemImage: "pencil") { model.editInfo(title) }
+                Button("Show in Finder", systemImage: "folder") {
+                    model.library.revealInFinder(title.allEpisodes.first?.id ?? title.id)
+                }
             }
         }
     }
@@ -56,28 +63,71 @@ extension View {
 
 // MARK: - Cards
 
+/// The watched check on a title's artwork. Watched titles always show it; on hover it becomes
+/// a Mark Watched / Mark Unwatched button. Sits outside the card's own button so clicking it
+/// never opens the title.
+struct WatchedToggle: View {
+    @Environment(AppModel.self) private var model
+    let title: Title
+    var episode: Episode?
+    let isHovered: Bool
+
+    var body: some View {
+        let isWatched = episode.map { model.isWatched($0, of: title) } ?? model.isWatched(title)
+        if isHovered || isWatched {
+            Button {
+                if let episode {
+                    model.setWatched(!isWatched, episodes: [episode], of: title)
+                } else {
+                    model.setWatched(!isWatched, title)
+                }
+            } label: {
+                Image(systemName: isWatched && isHovered ? "eye.slash" : "checkmark")
+                    .font(.caption.weight(.bold))
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 18, height: 18)
+            }
+            // At rest (a watched badge on every watched poster in a grid) it's a plain accent disc;
+            // interactive glass is only created while the pointer is over the card.
+            .buttonStyle(TheaterGlassButtonStyle(isCircular: true, tint: isWatched ? Theme.accent : nil, usesGlass: isHovered))
+            .help(isWatched ? "Watched · Click to mark as unwatched" : "Mark as watched")
+            .accessibilityLabel(isWatched ? "Mark \(title.name) as unwatched" : "Mark \(title.name) as watched")
+            .padding(8)
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+        }
+    }
+}
+
 struct PosterCard: View {
     @Environment(AppModel.self) private var model
     let title: Title
     var width: CGFloat = 176
+    @State private var isHovered = false
 
     var body: some View {
         Button { model.open(title) } label: {
             ArtworkView(title: title, style: .poster)
                 .frame(width: width, height: width * 1.5)
+                .overlay(alignment: .bottom) { PosterProgress(title: title) }
                 .clipShape(.rect(cornerRadius: Theme.cardRadius))
                 .hoverLift()
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) { WatchedToggle(title: title, isHovered: isHovered) }
+        .onHover { hovering in withAnimation(.snappy) { isHovered = hovering } }
         .titleContextMenu(title, model: model)
         .help([title.name, title.subtitleLine].filter { !$0.isEmpty }.joined(separator: " · "))
     }
 }
 
-/// Poster that fills its grid cell, used in browse grids.
+/// Poster that fills its grid cell, used in browse grids: the content rating and the
+/// viewer's own rating under the title, a progress bar for an unfinished movie, and a
+/// badge once it's been watched.
 struct GridPosterCard: View {
     @Environment(AppModel.self) private var model
     let title: Title
+    var myRating: Double?
+    @State private var isHovered = false
 
     var body: some View {
         Button { model.open(title) } label: {
@@ -85,21 +135,57 @@ struct GridPosterCard: View {
                 ArtworkView(title: title, style: .poster)
                     .aspectRatio(2 / 3, contentMode: .fit)
                     .overlay(alignment: .topLeading) { LibraryStatusBadge(title: title).padding(8) }
+                    .overlay(alignment: .bottom) { PosterProgress(title: title) }
                     .clipShape(.rect(cornerRadius: Theme.cardRadius))
                     .hoverLift(scale: 1.04)
-                VStack(alignment: .leading, spacing: 2) {
+                    .overlay(alignment: .topTrailing) { WatchedToggle(title: title, isHovered: isHovered) }
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title.name)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    Text(title.subtitleLine.isEmpty ? title.kind.displayName : title.subtitleLine)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        let rating = title.displayRating
+                        if !rating.isEmpty {
+                            Text(rating)
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(.secondary, lineWidth: 1))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let myRating {
+                            Label(myRating.formatted(.number.precision(.fractionLength(0...1))), systemImage: "star.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.gold)
+                                .labelStyle(.titleAndIcon)
+                                .help("Your rating")
+                        }
+                        Text(title.yearText ?? title.kind.displayName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
                 }
             }
         }
         .buttonStyle(.plain)
+        .onHover { hovering in withAnimation(.snappy) { isHovered = hovering } }
         .titleContextMenu(title, model: model)
+    }
+}
+
+/// A progress bar along the bottom of a movie's artwork while it's partly watched.
+struct PosterProgress: View {
+    @Environment(AppModel.self) private var model
+    let title: Title
+
+    var body: some View {
+        if let progress = model.partialProgress(title) {
+            WatchProgressBar(fraction: progress)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+                .accessibilityLabel("\(Int(progress * 100))% watched")
+        }
     }
 }
 
@@ -108,14 +194,17 @@ struct LandscapeCard: View {
     let title: Title
     var width: CGFloat = 300
     var caption: String?
+    @State private var isHovered = false
 
     var body: some View {
         Button { model.open(title) } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ArtworkView(title: title, style: .landscape)
                     .frame(width: width, height: width * 9 / 16)
+                    .overlay(alignment: .bottom) { PosterProgress(title: title) }
                     .clipShape(.rect(cornerRadius: Theme.cardRadius))
                     .hoverLift()
+                    .overlay(alignment: .topTrailing) { WatchedToggle(title: title, isHovered: isHovered) }
                 if let caption {
                     Text(caption)
                         .font(.caption)
@@ -126,6 +215,7 @@ struct LandscapeCard: View {
             }
         }
         .buttonStyle(.plain)
+        .onHover { hovering in withAnimation(.snappy) { isHovered = hovering } }
         .titleContextMenu(title, model: model)
     }
 }
@@ -135,6 +225,7 @@ struct Top10Card: View {
     @Environment(AppModel.self) private var model
     let rank: Int
     let title: Title
+    @State private var isHovered = false
 
     var body: some View {
         Button { model.open(title) } label: {
@@ -151,11 +242,14 @@ struct Top10Card: View {
                     .offset(y: 26)
                 ArtworkView(title: title, style: .poster)
                     .frame(width: 140, height: 210)
+                    .overlay(alignment: .bottom) { PosterProgress(title: title) }
                     .clipShape(.rect(cornerRadius: Theme.cardRadius))
                     .hoverLift()
+                    .overlay(alignment: .topTrailing) { WatchedToggle(title: title, isHovered: isHovered) }
             }
         }
         .buttonStyle(.plain)
+        .onHover { hovering in withAnimation(.snappy) { isHovered = hovering } }
         .titleContextMenu(title, model: model)
         .accessibilityLabel("Number \(rank), \(title.name)")
     }
@@ -163,7 +257,6 @@ struct Top10Card: View {
 
 struct ContinueWatchingCard: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.modelContext) private var modelContext
     let title: Title
     let entry: WatchProgress
     var width: CGFloat = 320
@@ -180,13 +273,16 @@ struct ContinueWatchingCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack {
                     ArtworkView(title: title, style: .landscape)
-                    Image(systemName: "play.fill")
-                        .font(.title2)
-                        .foregroundStyle(.white)
-                        .frame(width: 54, height: 54)
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .opacity(isHovered ? 1 : 0)
-                        .scaleEffect(isHovered ? 1 : 0.8)
+                    // Only built while hovered, so a row of cards doesn't keep idle glass around.
+                    if isHovered {
+                        Image(systemName: "play.fill")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .frame(width: 54, height: 54)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                            .accessibilityHidden(true)
+                    }
                 }
                 .frame(width: width, height: width * 9 / 16)
                 .overlay(alignment: .bottom) {
@@ -196,6 +292,7 @@ struct ContinueWatchingCard: View {
                 }
                 .clipShape(.rect(cornerRadius: Theme.cardRadius))
                 .hoverLift()
+                .overlay(alignment: .topTrailing) { WatchedToggle(title: title, episode: episode, isHovered: isHovered) }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(episode.map { "\($0.code) · \($0.name)" } ?? title.name)
@@ -219,10 +316,16 @@ struct ContinueWatchingCard: View {
             }
             Button("View Details", systemImage: "info.circle") { model.open(title) }
             Divider()
-            Button("Remove from Continue Watching", systemImage: "xmark.circle", role: .destructive) {
-                if let profile = model.profile {
-                    withAnimation { WatchHistory.removeFromContinueWatching(title, profileID: profile.id, in: modelContext) }
+            if let episode {
+                Button("Mark Episode as Watched", systemImage: "checkmark.circle") {
+                    model.setWatched(true, episodes: [episode], of: title)
                 }
+            }
+            Button(title.kind == .series ? "Mark Series as Watched" : "Mark as Watched", systemImage: "checkmark.circle.fill") {
+                model.setWatched(true, title)
+            }
+            Button("Remove from Continue Watching", systemImage: "xmark.circle", role: .destructive) {
+                model.removeFromContinueWatching(title)
             }
         }
         .accessibilityLabel("Resume \(title.name), \(entry.remainingDescription)")
@@ -289,6 +392,44 @@ struct PlayButtonStyle: ButtonStyle {
             .animation(.snappy(duration: 0.15), value: configuration.isPressed)
             .contentShape(.capsule)
     }
+}
+
+/// Liquid Glass buttons whose labels stay legible on any art. The system glass style lets the
+/// label take on the colors behind it and fades it when the window isn't key, which made button
+/// text vanish over bright backdrops; this keeps a white label over a faint dark base inside the glass.
+struct TheaterGlassButtonStyle: ButtonStyle {
+    var isCircular = false
+    /// Colors the base under the label instead of the default faint black, e.g. the accent for "on" states.
+    var tint: Color?
+    /// Off for buttons that sit on a surface that's already glass, so glass isn't stacked on glass.
+    var usesGlass = true
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = isCircular ? AnyShape(.circle) : AnyShape(.capsule)
+        let small = controlSize == .small || controlSize == .mini
+        configuration.label
+            .foregroundStyle(configuration.role == .destructive ? AnyShapeStyle(Color(hex: 0xFF6B6B)) : AnyShapeStyle(.white))
+            .padding(.horizontal, isCircular ? (small ? 3 : 6) : (small ? 8 : 12))
+            .padding(.vertical, isCircular ? (small ? 3 : 6) : (small ? 3 : 6))
+            .background((tint ?? .black).opacity(tint == nil ? (configuration.isPressed ? 0.5 : 0.35) : (configuration.isPressed ? 0.95 : 0.8)), in: shape)
+            .glassEffect(usesGlass ? .regular.interactive() : .identity, in: shape)
+            .opacity(isEnabled ? 1 : 0.45)
+            .contentShape(shape)
+            .animation(.snappy(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == TheaterGlassButtonStyle {
+    /// Capsule-shaped glass button with an always-legible label.
+    static var theaterGlass: TheaterGlassButtonStyle { TheaterGlassButtonStyle() }
+    /// Round glass button for icons, with an always-legible symbol.
+    static var theaterGlassCircle: TheaterGlassButtonStyle { TheaterGlassButtonStyle(isCircular: true) }
+    /// The same legible capsule without its own glass, for buttons inside a glass panel or capsule.
+    static var theaterPlain: TheaterGlassButtonStyle { TheaterGlassButtonStyle(usesGlass: false) }
+    /// Round variant of `theaterPlain`.
+    static var theaterPlainCircle: TheaterGlassButtonStyle { TheaterGlassButtonStyle(isCircular: true, usesGlass: false) }
 }
 
 /// Score · year · rating · length · genres, with quality badges. Skips anything unknown.

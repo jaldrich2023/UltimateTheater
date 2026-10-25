@@ -6,6 +6,7 @@
 //  Spec: https://www.matroska.org/technical/elements.html
 //
 
+import Compression
 import Foundation
 
 nonisolated final class MatroskaDemuxer: MediaDemuxer {
@@ -95,6 +96,10 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         case zlib
     }
 
+    /// A block whose bytes were read but don't parse (bad lacing, short header). Only that
+    /// block is skipped; the rest of its cluster still plays.
+    private struct DamagedBlock: Error {}
+
     init(source: FileByteSource) throws {
         self.source = source
         try parseHeaders()
@@ -105,13 +110,51 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
     // MARK: Packets
 
     func nextPacket() throws -> MediaPacket? {
-        do {
-            return try readNextPacket()
-        } catch ContainerError.truncated {
-            // A file that was cut off ends at its last complete block.
-            cursor = segmentEnd
-            return nil
+        while true {
+            do {
+                return try readNextPacket()
+            } catch ContainerError.truncated {
+                // A file that was cut off ends at its last complete block.
+                cursor = segmentEnd
+                return nil
+            } catch ContainerError.corrupt {
+                // Damage inside a cluster: pick up again at the next cluster.
+                pending = []
+                guard let next = try nextCluster(after: cursor) else {
+                    cursor = segmentEnd
+                    return nil
+                }
+                cursor = next
+            }
         }
+    }
+
+    /// Scans forward for the next Cluster ID (1F 43 B6 75) whose header parses.
+    private func nextCluster(after offset: UInt64) throws -> UInt64? {
+        let signature: [UInt8] = [0x1F, 0x43, 0xB6, 0x75]
+        var position = offset + 1
+        while position + 4 <= segmentEnd {
+            let chunk = [UInt8](try source.read(at: position, count: Int(min(1 << 20, segmentEnd - position))))
+            guard chunk.count >= 4 else { return nil }
+            for index in 0...(chunk.count - 4) where chunk[index] == 0x1F {
+                guard chunk[index + 1] == signature[1], chunk[index + 2] == signature[2], chunk[index + 3] == signature[3] else { continue }
+                let candidate = position + UInt64(index)
+                if isPlausibleCluster(at: candidate) { return candidate }
+            }
+            position += UInt64(chunk.count - 3) // Overlap so a split signature is still found.
+        }
+        return nil
+    }
+
+    /// A cluster header whose size fits the segment and whose first child is its Timecode,
+    /// so payload bytes that happen to match the Cluster ID aren't taken for one.
+    private func isPlausibleCluster(at offset: UInt64) -> Bool {
+        guard let header = try? readHeader(at: offset), header.id == ID.cluster,
+              header.dataOffset < segmentEnd else { return false }
+        if let size = header.size, size > segmentEnd - header.dataOffset { return false }
+        guard let first = try? readHeader(at: header.dataOffset), first.id == ID.timecode,
+              let timecodeSize = first.size, timecodeSize <= 8 else { return false }
+        return true
     }
 
     private func readNextPacket() throws -> MediaPacket? {
@@ -126,21 +169,27 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
                 cursor = header.dataOffset
                 continue
             case ID.timecode:
-                clusterTimecode = Int64(try payload(header).bigEndianUInt)
-            case ID.simpleBlock:
-                if let packets = try readBlock(header, isSimple: true, groupDuration: nil, hasReference: false) {
-                    cursor = try end(of: header)
-                    pending = Array(packets.dropFirst())
-                    return packets.first
+                clusterTimecode = Int64(clamping: try payload(header).bigEndianUInt)
+            case ID.simpleBlock, ID.blockGroup:
+                let packets: [MediaPacket]?
+                do {
+                    packets = header.id == ID.simpleBlock
+                        ? try readBlock(header, isSimple: true, groupDuration: nil, hasReference: false)
+                        : try readBlockGroup(header)
+                } catch is DamagedBlock {
+                    packets = nil // Skip just this block (its size is known: its bytes were read).
                 }
-            case ID.blockGroup:
-                if let packets = try readBlockGroup(header) {
+                if let packets {
                     cursor = try end(of: header)
                     pending = Array(packets.dropFirst())
                     return packets.first
                 }
             default:
                 guard header.size != nil else { return nil } // Unknown-size non-cluster: can't continue.
+            }
+            // An element running past the segment is garbage read as a header.
+            guard let size = header.size, size <= segmentEnd - min(header.dataOffset, segmentEnd) else {
+                throw ContainerError.corrupt("element overruns segment")
             }
             cursor = try end(of: header)
         }
@@ -150,7 +199,9 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
     @discardableResult
     func seek(to seconds: Double) throws -> Double {
         pending = []
-        let target = UInt64(max(seconds, 0) * 1_000_000_000 / timecodeScale)
+        let ticks = seconds.isFinite ? max(seconds, 0) * 1_000_000_000 / timecodeScale : 0
+        let target = ticks < 1.8e19 ? UInt64(ticks) : UInt64.max
+        // Cue positions were checked against the file size when the cues were read.
         if let cue = cues.last(where: { $0.time <= target }) ?? cues.first {
             cursor = segmentStart + cue.position
             return Double(cue.time) * timecodeScale / 1_000_000_000
@@ -200,7 +251,7 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         // Cues and chapters often live after the clusters; the SeekHead says where.
         // In a file that was cut off they may be missing; it still plays up to where it ends.
         for id in [ID.info, ID.tracks, ID.cues, ID.chapters] where !parsed.contains(id) {
-            guard let relative = seekPositions[id], segmentStart + relative < source.size,
+            guard let relative = seekPositions[id], segmentStart < source.size, relative < source.size - segmentStart,
                   let header = try? readHeader(at: segmentStart + relative), header.id == id else { continue }
             if id == ID.cues || id == ID.chapters {
                 try? parseTopLevel(header, seekPositions: &seekPositions)
@@ -222,11 +273,13 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
             }
         case ID.info:
             let fields = EBML.children(try bytes(header))
-            if let scale = fields.first(where: { $0.id == ID.timecodeScale }) {
+            // A zero or missing scale keeps the default (1 ms ticks).
+            if let scale = fields.first(where: { $0.id == ID.timecodeScale }), EBML.uint(scale.data) > 0 {
                 timecodeScale = Double(EBML.uint(scale.data))
             }
             if let value = fields.first(where: { $0.id == ID.duration }) {
-                duration = EBML.float(value.data) * timecodeScale / 1_000_000_000
+                // A non-finite or absurd duration is damage; the length is then unknown.
+                duration = FormatValidation.duration(EBML.float(value.data) * timecodeScale / 1_000_000_000)
             }
         case ID.tracks:
             tracks = EBML.children(try bytes(header)).filter { $0.id == ID.trackEntry }.compactMap(parseTrack)
@@ -238,11 +291,12 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
                       let cluster = EBML.children(positions.data).first(where: { $0.id == ID.cueClusterPosition }) else { return nil }
                 return (EBML.uint(time.data), EBML.uint(cluster.data))
             }
+            .filter { segmentStart < source.size && $0.position < source.size - segmentStart }
             .sorted { $0.time < $1.time }
         case ID.chapters:
             let editions = EBML.children(try bytes(header)).filter { $0.id == ID.editionEntry }
             if let edition = editions.first {
-                chapters = parseChapters(edition.data).sorted { $0.start < $1.start }
+                chapters = parseChapters(edition.data, depth: 0).sorted { $0.start < $1.start }
             }
         default:
             break
@@ -264,7 +318,11 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         }
         let video = field(ID.video).map(EBML.children) ?? []
         let audio = field(ID.audio).map(EBML.children) ?? []
-        let id = Int(number)
+        let id = Int(clamping: number)
+        // Dimensions beyond any real video come from damage; let the decoder find them instead.
+        func dimension(_ id: UInt32) -> Int? {
+            video.first { $0.id == id }.map { Int(clamping: EBML.uint($0.data)) }.flatMap { $0 <= 16384 ? $0 : nil }
+        }
 
         var track = ContainerTrack(id: id, kind: kind, codec: Self.codec(for: codecID, kind: kind), codecID: codecID)
         track.codecPrivate = field(ID.codecPrivate).map { Data($0) }
@@ -273,13 +331,14 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         track.isDefault = field(ID.flagDefault).map { EBML.uint($0) != 0 } ?? true
         track.isForced = field(ID.flagForced).map { EBML.uint($0) != 0 } ?? false
         track.frameDuration = field(ID.defaultDuration).map { Double(EBML.uint($0)) / 1_000_000_000 }
-        track.width = video.first { $0.id == ID.pixelWidth }.map { Int(EBML.uint($0.data)) }
-        track.height = video.first { $0.id == ID.pixelHeight }.map { Int(EBML.uint($0.data)) }
+        track.width = dimension(ID.pixelWidth)
+        track.height = dimension(ID.pixelHeight)
         track.sampleRate = audio.first { $0.id == ID.samplingFrequency }.map { EBML.float($0.data) } ?? (kind == .audio ? 8000 : nil)
-        track.channels = audio.first { $0.id == ID.channels }.map { Int(EBML.uint($0.data)) } ?? (kind == .audio ? 1 : nil)
-        track.bitDepth = audio.first { $0.id == ID.bitDepth }.map { Int(EBML.uint($0.data)) }
+        track.channels = audio.first { $0.id == ID.channels }.map { Int(clamping: EBML.uint($0.data)) }.flatMap { $0 <= 255 ? $0 : nil }
+            ?? (kind == .audio ? 1 : nil)
+        track.bitDepth = audio.first { $0.id == ID.bitDepth }.map { Int(clamping: EBML.uint($0.data)) }.flatMap { $0 <= 64 ? $0 : nil }
         if let transfer = video.first(where: { $0.id == ID.colour }).flatMap({ EBML.children($0.data).first { $0.id == ID.transferCharacteristics } }) {
-            track.hdr = HDRFormat(transferCharacteristics: Int(EBML.uint(transfer.data)))
+            track.hdr = HDRFormat(transferCharacteristics: Int(clamping: EBML.uint(transfer.data)))
         }
         // Dolby Vision configuration ('dvcC' / 'dvvC') rides in a block addition mapping.
         for mapping in fields where mapping.id == ID.blockAdditionMapping {
@@ -322,10 +381,12 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         return track
     }
 
-    private func parseChapters(_ data: ArraySlice<UInt8>) -> [ContainerChapter] {
-        EBML.children(data).filter { $0.id == ID.chapterAtom }.flatMap { atom -> [ContainerChapter] in
+    /// Nested chapter atoms are followed to a limited depth (damaged files can nest endlessly).
+    private func parseChapters(_ data: ArraySlice<UInt8>, depth: Int) -> [ContainerChapter] {
+        guard depth < 8 else { return [] }
+        return EBML.children(data).filter { $0.id == ID.chapterAtom }.flatMap { atom -> [ContainerChapter] in
             let fields = EBML.children(atom.data)
-            let nested = parseChapters(atom.data)
+            let nested = parseChapters(atom.data, depth: depth + 1)
             guard fields.first(where: { $0.id == ID.chapterFlagHidden }).map({ EBML.uint($0.data) }) != 1,
                   let start = fields.first(where: { $0.id == ID.chapterTimeStart }) else { return nested }
             let end = fields.first { $0.id == ID.chapterTimeEnd }.map { Double(EBML.uint($0.data)) / 1_000_000_000 }
@@ -361,7 +422,7 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         case "S_TEXT/ASS", "S_TEXT/SSA", "S_ASS", "S_SSA": .textASS
         case "A_DTS", "A_DTS/LOSSLESS": .dts
         case "A_DTS/EXPRESS": .unsupported("DTS Express")
-        case "A_TRUEHD": .unsupported("Dolby TrueHD")
+        case "A_TRUEHD", "A_MLP": .trueHD
         case "A_FLAC": .flac
         case "A_OPUS": .opus
         case "A_VORBIS": .vorbis
@@ -385,21 +446,32 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
         // Peek the track number before reading the (possibly large) payload.
         let peek = try source.read(at: header.dataOffset, count: 8)
         var reader = ByteReader(peek)
-        let track = Int(try EBML.readSize(&reader).value)
+        guard let number = try? EBML.readSize(&reader).value else { throw DamagedBlock() }
+        let track = Int(clamping: number)
         guard enabledTrackIDs.contains(track) else { return nil }
         return try parseBlock(try bytes(header)[...], isSimple: isSimple, groupDuration: groupDuration, hasReference: hasReference)
     }
 
+    /// Parses a block already in memory. Its bytes failing to parse throws `DamagedBlock`, not
+    /// `truncated`, so it isn't mistaken for the end of the file.
     private func parseBlock(_ data: ArraySlice<UInt8>, isSimple: Bool, groupDuration: UInt64?, hasReference: Bool) throws -> [MediaPacket]? {
+        do {
+            return try parseBlockContents(data, isSimple: isSimple, groupDuration: groupDuration, hasReference: hasReference)
+        } catch {
+            throw DamagedBlock()
+        }
+    }
+
+    private func parseBlockContents(_ data: ArraySlice<UInt8>, isSimple: Bool, groupDuration: UInt64?, hasReference: Bool) throws -> [MediaPacket]? {
         var reader = ByteReader(Array(data))
-        let trackNumber = Int(try EBML.readSize(&reader).value)
+        let trackNumber = Int(clamping: try EBML.readSize(&reader).value)
         guard enabledTrackIDs.contains(trackNumber), let track = tracks.first(where: { $0.id == trackNumber }) else { return nil }
         let relative = Int16(bitPattern: try reader.u16be())
         let flags = try reader.u8()
         let isKeyframe = isSimple ? (flags & 0x80) != 0 : !hasReference
 
         let frames = try Self.splitLaced(&reader, lacing: (flags >> 1) & 0x03)
-        let start = Double(clusterTimecode + Int64(relative)) * timecodeScale / 1_000_000_000
+        let start = Double(clusterTimecode &+ Int64(relative)) * timecodeScale / 1_000_000_000
         let step = track.frameDuration
             ?? track.codec.samplesPerFrame.flatMap { samples in track.sampleRate.map { Double(samples) / $0 } }
             ?? 0
@@ -436,7 +508,10 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
             for _ in 1..<max(count - 1, 1) where count > 2 {
                 let (raw, length) = try EBML.readSize(&reader)
                 let bias = (1 << (7 * length - 1)) - 1
-                size += Int(raw) - bias
+                // Damaged differences could overflow; any real size fits in the block.
+                let (next, overflow) = size.addingReportingOverflow(Int(raw) - bias)
+                guard !overflow else { throw ContainerError.corrupt("invalid lace size") }
+                size = next
                 sizes.append(size)
             }
         case 2: // Fixed: equal sizes.
@@ -453,8 +528,39 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
     private func decode(_ frame: Data, track: Int) -> Data {
         switch encodings[track] {
         case .headerStripping(let header): header + frame
-        case .zlib: (try? (frame.dropFirst(2) as NSData).decompressed(using: .zlib) as Data) ?? frame
+        case .zlib: Self.inflate(frame.dropFirst(2), limit: 16 << 20) ?? frame
         case nil: frame
+        }
+    }
+
+    /// Inflates raw deflate data, giving up (nil) on errors or output beyond `limit` bytes.
+    static func inflate(_ data: Data, limit: Int) -> Data? {
+        guard !data.isEmpty else { return nil }
+        let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+        defer { stream.deallocate() }
+        guard compression_stream_init(stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else { return nil }
+        defer { compression_stream_destroy(stream) }
+        let bufferSize = 64 << 10
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data? in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            stream.pointee.src_ptr = base
+            stream.pointee.src_size = raw.count
+            var output = Data()
+            while true {
+                stream.pointee.dst_ptr = buffer
+                stream.pointee.dst_size = bufferSize
+                let status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                let produced = bufferSize - stream.pointee.dst_size
+                output.append(buffer, count: produced)
+                guard output.count <= limit else { return nil }
+                switch status {
+                case COMPRESSION_STATUS_END: return output
+                case COMPRESSION_STATUS_OK where produced > 0 || stream.pointee.src_size > 0: continue
+                default: return nil
+                }
+            }
         }
     }
 
@@ -481,6 +587,7 @@ nonisolated final class MatroskaDemuxer: MediaDemuxer {
 
     private func payload(_ header: ElementHeader) throws -> Data {
         guard let size = header.size else { throw ContainerError.corrupt("unknown-size element") }
+        guard size <= UInt64(FileByteSource.maxPayloadSize) else { throw ContainerError.corrupt("oversized element") }
         let data = try source.read(at: header.dataOffset, count: Int(size))
         guard data.count == Int(size) else { throw ContainerError.truncated }
         return data

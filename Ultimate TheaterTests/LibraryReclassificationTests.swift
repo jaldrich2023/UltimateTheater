@@ -10,13 +10,37 @@ import Foundation
 import SwiftData
 @testable import Ultimate_Theater
 
+/// No API keys, and nothing read from the real Keychain.
+private struct NoSecrets: SecretStore {
+    func read(account: String, service: String) throws -> String? { nil }
+    func write(_ value: String?, account: String, service: String) throws {}
+}
+
+/// Metadata settings kept apart from the app's real preferences and Keychain.
 @MainActor
-struct LibraryReclassificationTests {
+private func isolatedMetadataSettings() -> MetadataSettings {
+    MetadataSettings(defaults: UserDefaults(suiteName: "MetadataSettingsTests-\(UUID().uuidString)") ?? .standard,
+                     secrets: NoSecrets())
+}
+
+@MainActor
+final class LibraryReclassificationTests {
+    /// This test's own folder for its database (and SQLite's -wal/-shm files), removed afterwards.
+    private let folder = FileManager.default.temporaryDirectory.appending(path: "LibraryReclassificationTests-\(UUID().uuidString)")
+
+    init() throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
     private func makeLibrary() throws -> MediaLibrary {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
+        let url = folder.appending(path: UUID().uuidString + ".sqlite")
         let container = try ModelContainer(for: LibraryStore.librarySchema,
                                            configurations: [ModelConfiguration("Library", schema: LibraryStore.librarySchema, url: url)])
-        return MediaLibrary(container: container, metadata: MetadataService(settings: MetadataSettings()))
+        return MediaLibrary(container: container, metadata: MetadataService(settings: isolatedMetadataSettings()))
     }
 
     @Test func episodeFiledAsAMovieMovesToItsShow() throws {

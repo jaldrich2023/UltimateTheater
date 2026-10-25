@@ -32,9 +32,20 @@ nonisolated enum ImageSubtitleEvent {
 }
 
 nonisolated enum SubtitleImaging {
+    /// Largest subtitle image or plane side accepted; anything bigger comes from damaged data.
+    static let maxDimension = 4096
+
+    /// Whether a bitmap size is plausible (positive, within `maxDimension`, and within the
+    /// display when its size is known).
+    static func isPlausible(width: Int, height: Int, display: (width: Int, height: Int)? = nil) -> Bool {
+        guard width > 0, height > 0, width <= maxDimension, height <= maxDimension else { return false }
+        guard let display else { return true }
+        return width <= display.width && height <= display.height
+    }
+
     /// An RGBA image from palette indices.
     static func image(width: Int, height: Int, indices: [UInt8], palette: [UInt32]) -> CGImage? {
-        guard width > 0, height > 0, indices.count >= width * height else { return nil }
+        guard isPlausible(width: width, height: height), indices.count >= width * height else { return nil }
         var pixels = [UInt32](repeating: 0, count: width * height)
         for i in 0..<(width * height) {
             let index = Int(indices[i])
@@ -110,8 +121,13 @@ nonisolated final class PGSDecoder {
 
     private func readComposition(_ s: [UInt8], pts: Double) {
         guard s.count >= 11 else { return }
-        planeWidth = Int(s[0]) << 8 | Int(s[1])
-        planeHeight = Int(s[2]) << 8 | Int(s[3])
+        // A zero or oversized plane is damage; keep the previous one.
+        let width = Int(s[0]) << 8 | Int(s[1])
+        let height = Int(s[2]) << 8 | Int(s[3])
+        if SubtitleImaging.isPlausible(width: width, height: height) {
+            planeWidth = width
+            planeHeight = height
+        }
         let state = s[7]
         if state & 0x80 != 0 { objects = [:] } // Epoch start: earlier objects are discarded.
         paletteID = Int(s[9])
@@ -163,8 +179,16 @@ nonisolated final class PGSDecoder {
         var object = objects[id] ?? Object()
         if sequence & 0x80 != 0 { // First fragment: data length, then the size.
             guard s.count >= 11 else { return }
-            object = Object(width: Int(s[7]) << 8 | Int(s[8]), height: Int(s[9]) << 8 | Int(s[10]), data: Data(s[11...]))
+            let width = Int(s[7]) << 8 | Int(s[8])
+            let height = Int(s[9]) << 8 | Int(s[10])
+            // Objects never exceed the graphics plane; larger sizes are damage.
+            guard SubtitleImaging.isPlausible(width: width, height: height, display: (planeWidth, planeHeight)) else {
+                objects[id] = nil
+                return
+            }
+            object = Object(width: width, height: height, data: Data(s[11...]))
         } else {
+            guard objects[id] != nil, object.data.count + s.count <= 16 << 20 else { return }
             object.data.append(contentsOf: s[4...])
         }
         objects[id] = object
@@ -315,6 +339,7 @@ nonisolated struct VobSubDecoder {
         }
         let width = area.x2 - area.x1 + 1
         let height = area.y2 - area.y1 + 1
+        guard SubtitleImaging.isPlausible(width: width, height: height) else { return nil }
         // Interlaced: even lines from the top field, odd lines from the bottom field.
         var indices = [UInt8](repeating: 0, count: width * height)
         for (parity, offset) in [(0, fields.top), (1, fields.bottom)] {
@@ -392,8 +417,12 @@ nonisolated final class DVBSubtitleDecoder {
             case 0x12: colorTable(segment)
             case 0x13: objectData(segment)
             case 0x14 where segment.count >= 5:
-                displayWidth = (Int(segment[1]) << 8 | Int(segment[2])) + 1
-                displayHeight = (Int(segment[3]) << 8 | Int(segment[4])) + 1
+                let width = (Int(segment[1]) << 8 | Int(segment[2])) + 1
+                let height = (Int(segment[3]) << 8 | Int(segment[4])) + 1
+                if SubtitleImaging.isPlausible(width: width, height: height) {
+                    displayWidth = width
+                    displayHeight = height
+                }
             case 0x80: events += finish(pts: pts)
             default: break
             }
@@ -419,6 +448,8 @@ nonisolated final class DVBSubtitleDecoder {
         let fill = s[1] & 0x08 != 0
         let width = Int(s[2]) << 8 | Int(s[3])
         let height = Int(s[4]) << 8 | Int(s[5])
+        // Regions lie within the display; larger ones are damage and aren't allocated.
+        guard SubtitleImaging.isPlausible(width: width, height: height, display: (displayWidth, displayHeight)) else { return }
         let depthCode = Int(s[6] >> 2 & 0x07) // 1 = 2-bit, 2 = 4-bit, 3 = 8-bit
         let depth = depthCode == 3 ? 8 : (depthCode == 2 ? 4 : 2)
         var region = regions[id] ?? Region()

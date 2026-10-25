@@ -86,3 +86,33 @@ final class UserRating {
         score.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(score)) : String(format: "%.1f", score)
     }
 }
+
+/// A favourite moment a profile saved while watching.
+@Model
+final class SceneBookmark {
+    @Attribute(.unique) var id: String
+    var profileID: String
+    var titleID: String
+    /// The movie's or episode's playback ID.
+    var playbackID: String
+    var time: Double
+    var note: String
+    var created: Date
+
+    init(profileID: String, titleID: String, playbackID: String, time: Double, note: String = "") {
+        self.id = UUID().uuidString
+        self.profileID = profileID
+        self.titleID = titleID
+        self.playbackID = playbackID
+        self.time = time
+        self.note = note
+        self.created = .now
+    }
+
+    /// "1:02:15" or "12:05".
+    var timeText: String {
+        let total = Int(max(time, 0))
+        let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60)
+        return hours > 0 ? String(format: "%d:%02d:%02d", hours, minutes, seconds) : String(format: "%d:%02d", minutes, seconds)
+    }
+}

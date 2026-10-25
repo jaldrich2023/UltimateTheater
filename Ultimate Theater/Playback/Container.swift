@@ -39,6 +39,8 @@ nonisolated enum MediaCodec: Hashable, Sendable {
     case eac3
     /// DTS Coherent Acoustics, decoded by the engine's own core decoder (`DTSCoreDecoder`).
     case dts
+    /// Dolby TrueHD / MLP, decoded losslessly by the engine (`TrueHDDecoder`).
+    case trueHD
     case mp3
     case mp2
     case flac
@@ -94,6 +96,7 @@ nonisolated enum MediaCodec: Hashable, Sendable {
         case .ac3: "Dolby Digital"
         case .eac3: "Dolby Digital Plus"
         case .dts: "DTS"
+        case .trueHD: "Dolby TrueHD"
         case .mp3: "MP3"
         case .mp2: "MP2"
         case .flac: "FLAC"
@@ -275,12 +278,15 @@ nonisolated enum Demuxers {
 
 // MARK: - File access
 
-/// Random-access file reads with a read-ahead cache, for sequential packet parsing.
+/// Random-access file reads with a read-ahead cache, for sequential packet parsing. Two
+/// cache windows are kept, so reading that alternates between two places in the file (a
+/// track stored apart from the other) doesn't reread each window.
 nonisolated final class FileByteSource {
     let size: UInt64
     private let handle: FileHandle
-    private var cache = Data()
-    private var cacheOffset: UInt64 = 0
+    /// Most recently used first.
+    private var windows: [(offset: UInt64, data: Data)] = []
+    private static let windowCount = 2
     private let chunkSize = 1 << 20
 
     init(url: URL) throws {
@@ -292,21 +298,38 @@ nonisolated final class FileByteSource {
         try? handle.close()
     }
 
-    /// Reads up to `count` bytes at `offset`; returns fewer only at end of file.
-    func read(at offset: UInt64, count: Int) throws -> Data {
-        guard count > 0, offset < size else { return Data() }
+    /// Largest single read; anything bigger comes from a damaged size field.
+    static let maxReadSize = 256 << 20
+    /// Largest packet or element payload a reader accepts from a size field.
+    static let maxPayloadSize = 64 << 20
+    /// Largest index a reader loads whole (an MP4 'moov'): metadata that must be parsed,
+    /// so it's allowed beyond `maxReadSize` when the file really holds it.
+    static let maxIndexSize = 1 << 30
+
+    /// Reads up to `count` bytes at `offset`; returns fewer only at end of file. Reads larger
+    /// than `limit` throw.
+    func read(at offset: UInt64, count requested: Int, limit: Int = FileByteSource.maxReadSize) throws -> Data {
+        guard requested > 0, offset < size else { return Data() }
+        let count = Int(min(UInt64(requested), size - offset))
+        guard count <= limit else { throw ContainerError.corrupt("oversized read") }
         let end = offset + UInt64(count)
-        if offset >= cacheOffset, end <= cacheOffset + UInt64(cache.count) {
-            let start = Int(offset - cacheOffset)
-            return cache.subdata(in: start..<(start + count))
+        if let hit = windows.firstIndex(where: { offset >= $0.offset && end <= $0.offset + UInt64($0.data.count) }) {
+            let window = windows[hit]
+            if hit != 0 {
+                windows.remove(at: hit)
+                windows.insert(window, at: 0)
+            }
+            let start = Int(offset - window.offset)
+            return window.data.subdata(in: start..<(start + count))
         }
         try handle.seek(toOffset: offset)
         if count > chunkSize {
             return Data(try handle.read(upToCount: count) ?? Data())
         }
-        cache = Data(try handle.read(upToCount: chunkSize) ?? Data())
-        cacheOffset = offset
-        return cache.prefix(count)
+        let data = Data(try handle.read(upToCount: chunkSize) ?? Data())
+        windows.insert((offset, data), at: 0)
+        if windows.count > Self.windowCount { windows.removeLast() }
+        return data.prefix(count)
     }
 }
 
@@ -337,31 +360,23 @@ nonisolated struct ByteReader {
     }
 
     mutating func take(_ count: Int) throws -> ArraySlice<UInt8> {
-        guard count >= 0, position + count <= bytes.count else { throw ContainerError.truncated }
+        guard count >= 0, position >= 0, position <= bytes.count, count <= bytes.count - position else {
+            throw ContainerError.truncated
+        }
         defer { position += count }
         return bytes[position..<(position + count)]
     }
 
     mutating func skip(_ count: Int) throws {
-        guard position + count <= bytes.count else { throw ContainerError.truncated }
+        guard count >= 0, position >= 0, position <= bytes.count, count <= bytes.count - position else {
+            throw ContainerError.truncated
+        }
         position += count
     }
 
     mutating func u16be() throws -> UInt16 {
         let b = try take(2)
         return UInt16(b[b.startIndex]) << 8 | UInt16(b[b.startIndex + 1])
-    }
-
-    mutating func u16le() throws -> UInt16 {
-        let b = try take(2)
-        return UInt16(b[b.startIndex]) | UInt16(b[b.startIndex + 1]) << 8
-    }
-
-    mutating func u32le() throws -> UInt32 {
-        let b = try take(4)
-        var value: UInt32 = 0
-        for (index, byte) in b.enumerated() { value |= UInt32(byte) << (8 * index) }
-        return value
     }
 
     mutating func fourCC() throws -> String {

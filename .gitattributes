@@ -1,0 +1,11 @@
+# Normalize line endings for text files.
+* text=auto
+
+# Binary assets: never diff or convert line endings.
+*.pdf  binary
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+
+# The Xcode project file (new text format) is text; merge it as text.
+project.xcproj text

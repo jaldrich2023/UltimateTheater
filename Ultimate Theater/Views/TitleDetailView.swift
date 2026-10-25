@@ -8,20 +8,47 @@ import SwiftData
 
 struct TitleDetailView: View {
     @Environment(AppModel.self) private var model
+    let titleID: String
+
+    var body: some View {
+        // Its queries are scoped to this title and profile, so they're rebuilt when the profile changes.
+        TitleDetailPage(titleID: titleID, profileID: model.profile?.id ?? "")
+            .id(model.profile?.id)
+    }
+}
+
+private struct TitleDetailPage: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.modelContext) private var modelContext
-    @Query private var allProgress: [WatchProgress]
-    @Query private var allMyList: [MyListEntry]
-    @Query private var allRatings: [UserRating]
+    /// This profile's rating of this title (at most one).
+    @Query private var ratings: [UserRating]
+    /// This profile's saved scenes in this title, in time order.
+    @Query private var scenes: [SceneBookmark]
+    @ScaledMetric(relativeTo: .largeTitle) private var titleSize: CGFloat = 60
 
     let titleID: String
+    let profileID: String
+
+    init(titleID: String, profileID: String) {
+        self.titleID = titleID
+        self.profileID = profileID
+        _ratings = Query(filter: #Predicate<UserRating> { $0.profileID == profileID && $0.titleID == titleID })
+        _scenes = Query(filter: #Predicate<SceneBookmark> { $0.profileID == profileID && $0.titleID == titleID },
+                        sort: \.time)
+    }
     @State private var selectedSeason = 1
     @State private var isConfirmingRemoval = false
+    @State private var isConfirmingDelete = false
     @State private var trackChoice = TrackChoice()
+    /// "Find Subtitles…" sheet for this movie or episode.
+    @State private var findingSubtitles: SubtitleSearchTarget?
     @State private var isShowingTrailer = false
     /// Play request waiting on the "use these settings every time?" answer.
     @State private var pendingPlay: PendingPlay?
     /// The damaged file being repaired, if the repair sheet is open.
     @State private var repairing: PlaybackItem?
+    /// The scroll view's visible height; the header is at least most of it.
+    @State private var viewportHeight: CGFloat = 0
 
     private struct PendingPlay: Identifiable {
         let item: PlaybackItem
@@ -29,22 +56,20 @@ struct TitleDetailView: View {
         var id: String { item.id }
     }
 
-    /// Read live from the library so refreshes and edits show immediately.
-    private var title: Title? { model.library.titles.first { $0.id == titleID } }
+    /// Read live from the profile's catalog (rebuilt on refreshes and edits), so a title the
+    /// profile's rating limit hides never shows. The administrator also sees titles not yet
+    /// in the catalog straight from the library.
+    private var title: Title? {
+        model.titleByID[titleID]
+            ?? (model.canManageLibrary ? model.library.titles.first { $0.id == titleID } : nil)
+    }
 
-    private var profileID: String { model.profile?.id ?? "" }
-
+    /// This profile's history for the title, from the model's cached watch history.
     private func progress(for title: Title) -> [WatchProgress] {
-        allProgress.filter { $0.profileID == profileID && $0.titleID == title.id }
+        model.watchProgressByTitle[title.id] ?? []
     }
 
-    private var userScore: Double? {
-        allRatings.first { $0.profileID == profileID && $0.titleID == titleID }?.score
-    }
-
-    private var isInMyList: Bool {
-        allMyList.contains { $0.profileID == profileID && $0.titleID == titleID }
-    }
+    private var userScore: Double? { ratings.first?.score }
 
     var body: some View {
         if let title {
@@ -52,6 +77,7 @@ struct TitleDetailView: View {
         } else {
             ContentUnavailableView("Title Removed", systemImage: "film",
                                    description: Text("This title is no longer in your library."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -68,32 +94,67 @@ struct TitleDetailView: View {
                     episodes(title, progress: progress)
                 }
 
+                details(title)
+
+                favouriteScenes(title)
+
                 let similar = WatchHistory.similar(to: title, in: model.titles)
                 if !similar.isEmpty {
                     Shelf(title: "More Like This", items: similar) { item in
                         PosterCard(title: item)
                     }
                 }
-
-                details(title)
             }
             .padding(.bottom, 60)
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
+            viewportHeight = height
         }
         .ignoresSafeArea(edges: .top)
         .background { AppBackground() }
         .navigationTitle(title.name)
         .toolbar {
-            ToolbarItem {
-                libraryMenu(title)
+            if model.canManageLibrary {
+                ToolbarItem {
+                    libraryMenu(title)
+                }
             }
         }
         .sheet(item: $repairing) { item in
             RepairView(title: item.title, playbackID: item.id)
         }
+        .sheet(item: $findingSubtitles) { target in
+            SubtitleSearchView(target: target) { subtitle in
+                Task {
+                    await loadTracks(for: target.item, title: title)
+                    if trackChoice.list?.subtitles.contains(where: { $0.id == subtitle.id }) == true {
+                        trackChoice.subtitleID = subtitle.id
+                    }
+                }
+            }
+        }
+        .confirmationDialog("Delete “\(title.name)”?", isPresented: $isConfirmingDelete, titleVisibility: .visible) {
+            Button("Remove from Library", role: .destructive) {
+                model.manageLibrary("Enter the administrator PIN to remove “\(title.name)”.") {
+                    model.close(title.id)
+                    model.library.remove(title.id)
+                }
+            }
+            Button(title.kind == .movie ? "Move File to Trash" : "Move All Episode Files to Trash", role: .destructive) {
+                model.manageLibrary("Enter the administrator PIN to move “\(title.name)” to the Trash.") {
+                    model.close(title.id)
+                    model.library.moveToTrash(title.id)
+                }
+            }
+        } message: {
+            Text("Removing keeps the video files on disk. Moving them to the Trash deletes them from your library and your Mac.")
+        }
         .confirmationDialog("Remove “\(title.name)” from your library?", isPresented: $isConfirmingRemoval) {
             Button("Remove from Library", role: .destructive) {
-                model.close(title.id)
-                model.library.remove(title.id)
+                model.manageLibrary("Enter the administrator PIN to remove “\(title.name)”.") {
+                    model.close(title.id)
+                    model.library.remove(title.id)
+                }
             }
         } message: {
             Text("The video files stay on your Mac. You can add them again at any time.")
@@ -133,7 +194,7 @@ struct TitleDetailView: View {
 
     private func loadTracks(for item: PlaybackItem, title: Title) async {
         guard item.isPlayable,
-              let list = await model.library.withFileAccess(item.id, { await MediaInspector.trackList(for: $0) }) else {
+              let list = await model.library.withFileAccess(item.id, { await MediaInspector.trackList(for: $0, playbackID: item.id) }) else {
             trackChoice = TrackChoice()
             return
         }
@@ -169,7 +230,70 @@ struct TitleDetailView: View {
 
     private func header(_ title: Title, resume: (item: PlaybackItem, position: Double, label: String),
                         resumeEntry: WatchProgress?) -> some View {
-        ZStack(alignment: .bottomLeading) {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title.name)
+                .font(.system(size: titleSize, weight: .black))
+                .fontWidth(.condensed)
+                .lineLimit(2)
+                .minimumScaleFactor(0.6)
+            MetadataLine(title: title)
+            RatingsRow(ratings: title.ratings, userScore: userScore) { score in
+                model.setRating(score, for: title)
+            }
+            if !title.tagline.isEmpty {
+                Text(title.tagline)
+                    .font(.title3.italic())
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            if !title.synopsis.isEmpty {
+                Text(title.synopsis)
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(6)
+                    .frame(maxWidth: 620, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if title.needsMatch {
+                notice("This title wasn't recognized automatically.", systemImage: "questionmark.circle.fill",
+                       action: model.canManageLibrary ? ("Fix Match…", { model.fixMatch(title) }) : nil)
+            }
+            if !resume.item.isPlayable {
+                let issue = resume.item.episode?.playbackIssue ?? title.playbackIssue
+                notice(issue?.message ?? "This file can't be played.", systemImage: "exclamationmark.triangle.fill",
+                       action: issue?.isDamage == true && model.canManageLibrary ? ("Repair…", {
+                           let item = resume.item
+                           model.manageLibrary("Enter the administrator PIN to repair this file.") { repairing = item }
+                       }) : nil)
+            }
+
+            actions(title, resume: resume, resumeEntry: resumeEntry)
+                .padding(.top, 4)
+
+            TrackPickers(choice: $trackChoice, onFindSubtitles: resume.item.isPlayable ? {
+                findingSubtitles = SubtitleSearchTarget(item: resume.item, library: model.library)
+            } : nil)
+
+            credits(title)
+
+            if let collection = title.collection {
+                Button { model.open(collection) } label: {
+                    Label("Part of \(collection.name)", systemImage: "square.stack.3d.up.fill")
+                        .font(.callout.weight(.semibold))
+                }
+                .buttonStyle(.theaterGlass)
+                .help("See every movie in this collection")
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, pageMargin)
+        .padding(.top, 60)
+        .padding(.bottom, 24)
+        // At least most of the window tall, but as tall as the text and buttons need: the
+        // content decides the height and the backdrop fills in behind it, so nothing is cut
+        // off in a short window.
+        .frame(maxWidth: .infinity, minHeight: max(viewportHeight * 0.8, 520), alignment: .bottomLeading)
+        .background {
             ZStack {
                 ArtworkView(title: title, style: .backdrop)
                 LinearGradient(stops: [
@@ -180,62 +304,10 @@ struct TitleDetailView: View {
                 LinearGradient(colors: [.clear, .clear, Theme.background], startPoint: .top, endPoint: .bottom)
             }
             .backgroundExtensionEffect()
-
-            VStack(alignment: .leading, spacing: 16) {
-                Text(title.name)
-                    .font(.system(size: 60, weight: .black))
-                    .fontWidth(.condensed)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.6)
-                MetadataLine(title: title)
-                RatingsRow(ratings: title.ratings, userScore: userScore) { score in
-                    model.setRating(score, for: title)
-                }
-                if !title.tagline.isEmpty {
-                    Text(title.tagline)
-                        .font(.title3.italic())
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                if !title.synopsis.isEmpty {
-                    Text(title.synopsis)
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(6)
-                        .frame(maxWidth: 620, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if title.needsMatch {
-                    notice("This title wasn't recognized automatically.", systemImage: "questionmark.circle.fill",
-                           action: ("Fix Match…", { model.matchingTitle = title }))
-                }
-                if !resume.item.isPlayable {
-                    let issue = resume.item.episode?.playbackIssue ?? title.playbackIssue
-                    notice(issue?.message ?? "This file can't be played.", systemImage: "exclamationmark.triangle.fill",
-                           action: issue?.isDamage == true && model.canManageLibrary ? ("Repair…", { repairing = resume.item }) : nil)
-                }
-
-                actions(title, resume: resume, resumeEntry: resumeEntry)
-                    .padding(.top, 4)
-
-                TrackPickers(choice: $trackChoice)
-
-                credits(title)
-
-                if let collection = title.collection {
-                    Button { model.open(collection) } label: {
-                        Label("Part of \(collection.name)", systemImage: "square.stack.3d.up.fill")
-                            .font(.callout.weight(.semibold))
-                    }
-                    .buttonStyle(.glass)
-                    .help("See every movie in this collection")
-                }
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, pageMargin)
-            .padding(.bottom, 24)
+            // Full width from the first frame: no layout animation slides it into place.
+            .transaction { $0.animation = nil }
+            .overlay(alignment: .bottom) { ArtEdgeDivider() }
         }
-        .containerRelativeFrame(.vertical) { height, _ in max(height * 0.8, 520) }
         .clipped()
     }
 
@@ -267,8 +339,9 @@ struct TitleDetailView: View {
             Text(text)
                 .font(.callout)
             if let action {
+                // The capsule is already glass; the button keeps its legible base without stacking more.
                 Button(action.0, action: action.1)
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterPlain)
             }
         }
         .padding(.horizontal, 14)
@@ -278,89 +351,136 @@ struct TitleDetailView: View {
 
     private func actions(_ title: Title, resume: (item: PlaybackItem, position: Double, label: String),
                          resumeEntry: WatchProgress?) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Button {
-                requestPlay(resume.item, from: resume.position)
-            } label: {
-                VStack(spacing: 6) {
-                    Label(resume.label, systemImage: "play.fill")
-                    if resume.position > 0, let resumeEntry {
-                        WatchProgressBar(fraction: resumeEntry.fraction)
-                            .frame(width: 110)
-                    }
-                }
-            }
-            .buttonStyle(PlayButtonStyle())
-            .keyboardShortcut(.return, modifiers: [])
-            .disabled(!resume.item.isPlayable)
-
-            if resume.position > 0 {
-                Button {
-                    requestPlay(resume.item, from: 0)
-                } label: {
-                    Label("Start Over", systemImage: "gobackward")
-                        .font(.headline)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.glass)
-            }
-
-            Button {
-                withAnimation(.snappy) {
-                    WatchHistory.toggleMyList(title, profileID: profileID, entries: allMyList, in: modelContext)
-                }
-            } label: {
-                Label(isInMyList ? "In My List" : "My List", systemImage: isInMyList ? "checkmark" : "plus")
-                    .font(.headline)
-                    .contentTransition(.symbolEffect(.replace))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.glass)
-            .keyboardShortcut("l", modifiers: .command)
-            .help("Add or remove from My List (⌘L)")
-
+        // Full labels when the row fits; otherwise the secondary buttons shrink to icons
+        // (still labelled for VoiceOver and tooltips) so nothing runs off a narrow window.
+        ViewThatFits(in: .horizontal) {
+            actionRow(title, resume: resume, resumeEntry: resumeEntry, isCompact: false)
+            actionRow(title, resume: resume, resumeEntry: resumeEntry, isCompact: true)
+        }
+        .sheet(isPresented: $isShowingTrailer) {
             if let trailer = title.trailer {
-                Button {
-                    isShowingTrailer = true
-                } label: {
-                    Label("Trailer", systemImage: "play.rectangle")
-                        .font(.headline)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.glass)
-                .keyboardShortcut("t", modifiers: .command)
-                .help("Watch the trailer (⌘T)")
-                .sheet(isPresented: $isShowingTrailer) {
-                    TrailerView(title: title, trailer: trailer)
-                }
-            }
-
-            if let resumeEntry, resume.position > 0 {
-                Text(resumeEntry.remainingDescription)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
+                TrailerView(title: title, trailer: trailer)
             }
         }
     }
 
+    private func actionRow(_ title: Title, resume: (item: PlaybackItem, position: Double, label: String),
+                           resumeEntry: WatchProgress?, isCompact: Bool) -> some View {
+        let isInMyList = model.isInMyList(title)
+        let isWatched = WatchHistory.isWatched(title, in: progress(for: title))
+        // One container so the row's glass buttons render and blend together.
+        return GlassEffectContainer(spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                Button {
+                    requestPlay(resume.item, from: resume.position)
+                } label: {
+                    VStack(spacing: 6) {
+                        // Resuming shows how much is left right on the button.
+                        if let resumeEntry, resume.position > 0 {
+                            Label("\(resume.label) · \(resumeEntry.remainingDescription)", systemImage: "play.fill")
+                        } else {
+                            Label(resume.label, systemImage: "play.fill")
+                        }
+                        if resume.position > 0, let resumeEntry {
+                            WatchProgressBar(fraction: resumeEntry.fraction)
+                                .frame(width: 110)
+                        }
+                    }
+                }
+                .buttonStyle(PlayButtonStyle())
+                // Return belongs to the player, a PIN pad, or the search field while they're in use.
+                .keyboardShortcut(model.acceptsPlayReturnKey ? KeyboardShortcut(.return, modifiers: []) : nil)
+                .disabled(!resume.item.isPlayable)
+                .fixedSize()
+
+                if resume.position > 0 {
+                    Button {
+                        requestPlay(resume.item, from: 0)
+                    } label: {
+                        secondaryLabel("Start Over", systemImage: "gobackward", isCompact: isCompact)
+                    }
+                    .buttonStyle(.theaterGlass)
+                    .help("Start Over")
+                }
+
+                Button {
+                    model.toggleMyList(title)
+                } label: {
+                    secondaryLabel(isInMyList ? "In My List" : "My List", systemImage: isInMyList ? "checkmark" : "plus",
+                                   isCompact: isCompact)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.theaterGlass)
+                .keyboardShortcut("l", modifiers: .command)
+                .help("Add or remove from My List (⌘L)")
+
+                Button {
+                    model.setWatched(!isWatched, title)
+                } label: {
+                    secondaryLabel(isWatched ? "Watched" : "Mark Watched",
+                                   systemImage: isWatched ? "checkmark.circle.fill" : "checkmark.circle", isCompact: isCompact)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.theaterGlass)
+                .help(isWatched ? "Mark as unwatched" : "Mark as watched")
+
+                if title.trailer != nil {
+                    Button {
+                        isShowingTrailer = true
+                    } label: {
+                        secondaryLabel("Trailer", systemImage: "play.rectangle", isCompact: isCompact)
+                    }
+                    .buttonStyle(.theaterGlass)
+                    // ⌘T is the system's Show Fonts / new tab shortcut.
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .help("Watch the trailer (⇧⌘T)")
+                }
+
+                if model.canManageLibrary {
+                    Button {
+                        // The PIN is asked once a choice is made in the dialog.
+                        isConfirmingDelete = true
+                    } label: {
+                        secondaryLabel("Delete", systemImage: "trash", isCompact: isCompact)
+                    }
+                    .buttonStyle(.theaterGlass)
+                    .help("Remove this title from your library, or move its files to the Trash")
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    /// A secondary action's label: text and icon, or just the icon in a narrow window (the
+    /// text stays as its accessibility label).
+    @ViewBuilder
+    private func secondaryLabel(_ text: String, systemImage: String, isCompact: Bool) -> some View {
+        Group {
+            if isCompact {
+                Image(systemName: systemImage)
+                    .accessibilityLabel(text)
+            } else {
+                Label(text, systemImage: systemImage)
+            }
+        }
+        .font(.headline)
+            .padding(.horizontal, isCompact ? 4 : 10)
+            .padding(.vertical, 6)
+    }
+
     private func libraryMenu(_ title: Title) -> some View {
         Menu {
-            Button("Refresh Info", systemImage: "arrow.clockwise") {
-                Task { await model.library.refreshMetadata(for: [title.id], force: true) }
-            }
-            .disabled(model.library.isBusy)
-            Button("Fix Match…", systemImage: "wand.and.stars") { model.matchingTitle = title }
-            Button("Edit Info…", systemImage: "pencil") { model.editingTitle = title }
+            Button("Refresh Info", systemImage: "arrow.clockwise") { model.refreshInfo(for: [title.id]) }
+                .disabled(model.library.isBusy)
+            Button("Fix Match…", systemImage: "wand.and.stars") { model.fixMatch(title) }
+            Button("Edit Info…", systemImage: "pencil") { model.editInfo(title) }
             Divider()
             Button("Show in Finder", systemImage: "folder") {
                 model.library.revealInFinder(title.allEpisodes.first?.id ?? title.id)
             }
             Button("Check File for Damage…", systemImage: "bandage") {
-                repairing = PlaybackItem(title: title, episode: title.allEpisodes.first)
+                let item = PlaybackItem(title: title, episode: title.allEpisodes.first)
+                model.manageLibrary("Enter the administrator PIN to check and repair this file.") { repairing = item }
             }
             Divider()
             Button("Remove from Library…", systemImage: "trash", role: .destructive) {
@@ -395,9 +515,13 @@ struct TitleDetailView: View {
             .padding(.horizontal, pageMargin)
 
             LazyVStack(spacing: 4) {
-                ForEach(season?.episodes ?? []) { episode in
+                let episodes = season?.episodes ?? []
+                let finished = Set(progress.filter(\.isFinished).map(\.playbackID))
+                ForEach(episodes) { episode in
                     EpisodeRow(title: title, episode: episode,
                                progress: progress.first { $0.playbackID == episode.id },
+                               season: episodes,
+                               isSeasonWatched: !episodes.isEmpty && episodes.allSatisfy { finished.contains($0.id) },
                                onPlay: requestPlay)
                 }
             }
@@ -453,6 +577,68 @@ struct TitleDetailView: View {
         .padding(.horizontal, pageMargin)
     }
 
+    /// Moments this profile saved while watching, each playable from that point.
+    @ViewBuilder
+    private func favouriteScenes(_ title: Title) -> some View {
+        if !scenes.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Favourite Scenes")
+                    .font(.title2.weight(.bold))
+                ScrollView(.horizontal) {
+                    HStack(spacing: 12) {
+                        ForEach(scenes) { scene in
+                            let episode = title.allEpisodes.first { $0.id == scene.playbackID }
+                            let item = PlaybackItem(title: title, episode: episode)
+                            HStack(spacing: 12) {
+                                Button {
+                                    requestPlay(item, from: scene.time)
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "heart.fill")
+                                            .foregroundStyle(Theme.accent)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(scene.timeText)
+                                                .font(.headline.monospacedDigit())
+                                            Text(episode.map { "\($0.code) · \($0.name)" } ?? "Play from here")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                    .contentShape(.rect)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!item.isPlayable)
+                                .help("Play from \(scene.timeText)")
+                                Button {
+                                    withAnimation(.snappy) {
+                                        modelContext.delete(scene)
+                                        try? modelContext.save()
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.caption.weight(.bold))
+                                }
+                                // The scene's row is already glass, so no glass of its own.
+                                .buttonStyle(.theaterPlainCircle)
+                                .controlSize(.small)
+                                .help("Remove this scene")
+                                .accessibilityLabel("Remove scene at \(scene.timeText)")
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .scrollIndicators(.never)
+            }
+            .padding(.horizontal, pageMargin)
+        }
+    }
+
     @ViewBuilder
     private func detail(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -470,11 +656,17 @@ struct TitleDetailView: View {
 }
 
 struct EpisodeRow: View {
+    @Environment(AppModel.self) private var model
     let title: Title
     let episode: Episode
     let progress: WatchProgress?
+    /// Every episode in this episode's season, for "Mark Season Watched".
+    var season: [Episode] = []
+    var isSeasonWatched = false
     let onPlay: (PlaybackItem, Double) -> Void
     @State private var isHovered = false
+
+    private var isWatched: Bool { progress?.isFinished == true }
 
     var body: some View {
         Button {
@@ -497,11 +689,15 @@ struct EpisodeRow: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                    Image(systemName: episode.isPlayable ? "play.fill" : "exclamationmark.triangle.fill")
-                        .font(.title2)
-                        .frame(width: 48, height: 48)
-                        .glassEffect(.regular, in: .circle)
-                        .opacity(isHovered ? 1 : 0)
+                    // Only built while hovered, so a long season doesn't keep idle glass around.
+                    if isHovered {
+                        Image(systemName: episode.isPlayable ? "play.fill" : "exclamationmark.triangle.fill")
+                            .font(.title2)
+                            .frame(width: 48, height: 48)
+                            .glassEffect(.regular, in: .circle)
+                            .transition(.opacity)
+                            .accessibilityHidden(true)
+                    }
                 }
                 .frame(width: 224, height: 126)
                 .overlay(alignment: .bottom) {
@@ -523,7 +719,8 @@ struct EpisodeRow: View {
                                 .accessibilityLabel("Watched")
                         }
                         if episode.runtimeMinutes > 0 {
-                            Text("\(episode.runtimeMinutes)m")
+                            Text(Duration.seconds(episode.runtimeMinutes * 60)
+                                .formatted(.units(allowed: [.hours, .minutes], width: .narrow)))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -550,7 +747,39 @@ struct EpisodeRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!episode.isPlayable)
+        .overlay(alignment: .bottomTrailing) {
+            // Outside the row's play button so clicking it never starts playback.
+            if isHovered {
+                Button { model.setWatched(!isWatched, episodes: [episode], of: title) } label: {
+                    Image(systemName: isWatched ? "eye.slash" : "checkmark")
+                        .font(.callout.weight(.semibold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.theaterGlassCircle)
+                .help(isWatched ? "Mark as Unwatched" : "Mark as Watched")
+                .accessibilityLabel(isWatched ? "Mark episode \(episode.number) as unwatched" : "Mark episode \(episode.number) as watched")
+                .padding(20)
+                .transition(.opacity)
+            }
+        }
         .onHover { hovering in withAnimation(.snappy) { isHovered = hovering } }
-        .accessibilityLabel("Episode \(episode.number), \(episode.name)")
+        .contextMenu {
+            Button(isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched",
+                   systemImage: isWatched ? "eye.slash" : "checkmark.circle") {
+                model.setWatched(!isWatched, episodes: [episode], of: title)
+            }
+            if season.count > 1 {
+                Button(isSeasonWatched ? "Mark Season \(episode.season) as Unwatched" : "Mark Season \(episode.season) as Watched",
+                       systemImage: isSeasonWatched ? "eye.slash" : "checkmark.circle.fill") {
+                    model.setWatched(!isSeasonWatched, episodes: season, of: title)
+                }
+            }
+            Divider()
+            Button(model.isWatched(title) ? "Mark Series as Unwatched" : "Mark Series as Watched",
+                   systemImage: "tv") {
+                model.setWatched(!model.isWatched(title), title)
+            }
+        }
+        .accessibilityLabel("Episode \(episode.number), \(episode.name)\(isWatched ? ", watched" : "")")
     }
 }

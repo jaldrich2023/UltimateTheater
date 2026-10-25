@@ -58,9 +58,11 @@ struct TrackChoice: Equatable {
 
 struct TrackPickers: View {
     @Binding var choice: TrackChoice
+    /// Offers "Find Subtitles…" (OpenSubtitles) when set.
+    var onFindSubtitles: (() -> Void)? = nil
 
     var body: some View {
-        if let list = choice.list, choice.hasChoices {
+        if let list = choice.list, choice.hasChoices || onFindSubtitles != nil {
             HStack(spacing: 10) {
                 if !list.audio.isEmpty {
                     Menu {
@@ -79,39 +81,49 @@ struct TrackPickers: View {
                     .help("Audio track")
                 }
 
-                Menu {
-                    Picker("Subtitles", selection: $choice.subtitleID) {
-                        Text("Off").tag(String?.none)
-                        ForEach(list.subtitles) { option in
-                            Text(Self.label(option))
-                                .tag(Optional(option.id))
-                                .disabled(!option.isSupported)
-                        }
+                if list.subtitles.isEmpty, let onFindSubtitles {
+                    Button(action: onFindSubtitles) {
+                        Label("Find Subtitles…", systemImage: "captions.bubble")
+                            .lineLimit(1)
                     }
-                    .pickerStyle(.inline)
-                } label: {
-                    Label(choice.subtitle.map { "Subtitles: \($0.title)" } ?? "Subtitles: Off",
-                          systemImage: choice.subtitle == nil ? "captions.bubble" : "captions.bubble.fill")
-                        .lineLimit(1)
+                    .help("This title has no subtitles. Search OpenSubtitles for some.")
+                } else {
+                    Menu {
+                        Picker("Subtitles", selection: $choice.subtitleID) {
+                            Text("Off").tag(String?.none)
+                            ForEach(list.subtitles) { option in
+                                Text(Self.label(option))
+                                    .tag(Optional(option.id))
+                                    .disabled(!option.isSupported)
+                            }
+                        }
+                        .pickerStyle(.inline)
+                        if let onFindSubtitles {
+                            Divider()
+                            Button("Find Subtitles…", systemImage: "magnifyingglass", action: onFindSubtitles)
+                        }
+                    } label: {
+                        Label(choice.subtitle.map { "Subtitles: \($0.title)" } ?? "Subtitles: Off",
+                              systemImage: choice.subtitle == nil ? "captions.bubble" : "captions.bubble.fill")
+                            .lineLimit(1)
+                    }
+                    .disabled(list.subtitles.isEmpty)
+                    .help(list.subtitles.isEmpty ? "This title has no subtitles" : "Subtitles")
                 }
-                .disabled(list.subtitles.isEmpty)
-                .help(list.subtitles.isEmpty ? "This title has no subtitles" : "Subtitles")
 
-                Text(summary(list))
+                summary(list)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.button)
-            .buttonStyle(.glass)
+            .buttonStyle(.theaterGlass)
             .font(.callout.weight(.medium))
             .fixedSize()
         }
     }
 
-    private func summary(_ list: MediaTrackList) -> String {
-        let audio = list.audio.count == 1 ? "1 audio track" : "\(list.audio.count) audio tracks"
-        let subtitles = list.subtitles.count == 1 ? "1 subtitle" : "\(list.subtitles.count) subtitles"
-        return "\(audio) · \(subtitles)"
+    private func summary(_ list: MediaTrackList) -> Text {
+        Text("^[\(list.audio.count) audio track](inflect: true) · ^[\(list.subtitles.count) subtitle](inflect: true)")
     }
 
     static func label(_ option: TrackOption) -> String {

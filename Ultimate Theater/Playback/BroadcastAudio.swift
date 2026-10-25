@@ -18,7 +18,7 @@ nonisolated struct BitCursor {
     var remaining: Int { bytes.count * 8 - position }
 
     mutating func read(_ count: Int) -> Int? {
-        guard count <= remaining else { return nil }
+        guard count >= 0, count <= remaining else { return nil }
         var value = 0
         for _ in 0..<count {
             value = value << 1 | Int(bytes[position / 8] >> (7 - UInt8(position % 8))) & 1
@@ -27,11 +27,11 @@ nonisolated struct BitCursor {
         return value
     }
 
-    mutating func skip(_ count: Int) { position = min(position + count, bytes.count * 8) }
+    mutating func skip(_ count: Int) { position = min(position + max(count, 0), bytes.count * 8) }
 
     /// `count` whole bytes starting at the current (possibly unaligned) bit position.
     mutating func readBytes(_ count: Int) -> [UInt8]? {
-        guard count * 8 <= remaining else { return nil }
+        guard count >= 0, count <= remaining / 8 else { return nil }
         return (0..<count).map { _ in UInt8(read(8)!) }
     }
 
@@ -173,7 +173,7 @@ nonisolated struct LATMParser {
             _ = frequency()
             type = objectType()
         }
-        guard [1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22, 23].contains(type), channelConfiguration > 0 else { return false }
+        guard [1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22, 23].contains(type), channelConfiguration > 0, rate > 0 else { return false }
         _ = r.read(1) // frameLengthFlag
         if r.read(1) == 1 { _ = r.read(14) } // dependsOnCoreCoder
         let extensionFlag = r.read(1) ?? 0

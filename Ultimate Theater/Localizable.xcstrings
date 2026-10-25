@@ -1,0 +1,1950 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "" : {
+
+    },
+    " " : {
+
+    },
+    "· %@" : {
+
+    },
+    "%@ · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "%@ (⌘%@)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ (⌘%2$@)"
+          }
+        }
+      }
+    },
+    "%@ (S)" : {
+
+    },
+    "%@ / 10" : {
+
+    },
+    "%@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ %2$@"
+          }
+        }
+      }
+    },
+    "%@ can't be told where to start or seek from here; use its remote to scan. Watch on This Mac picks up where it is." : {
+
+    },
+    "%@ downloads" : {
+
+    },
+    "%@ file with damage" : {
+
+    },
+    "%@ of video with %lld audio track%@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ of video with %2$lld audio track%3$@."
+          }
+        }
+      }
+    },
+    "%@ profile" : {
+
+    },
+    "%@ stars" : {
+
+    },
+    "%@, ^[%lld title](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, ^[%2$lld title](inflect: true)"
+          }
+        }
+      }
+    },
+    "%@, not in your library" : {
+
+    },
+    "%@: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@: %2$@"
+          }
+        }
+      }
+    },
+    "%lld" : {
+
+    },
+    "%lld of %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld"
+          }
+        }
+      }
+    },
+    "%lld of %lld digits entered" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld digits entered"
+          }
+        }
+      }
+    },
+    "%lld of ^[%lld movie](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of ^[%2$lld movie](inflect: true)"
+          }
+        }
+      }
+    },
+    "%lld of ^[%lld title](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of ^[%2$lld title](inflect: true)"
+          }
+        }
+      }
+    },
+    "%lld percent watched" : {
+
+    },
+    "%lld saved" : {
+
+    },
+    "%lld selected" : {
+
+    },
+    "%lld. %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld. %2$@"
+          }
+        }
+      }
+    },
+    "%lld/%lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld/%2$lld"
+          }
+        }
+      }
+    },
+    "%lld%%" : {
+
+    },
+    "%lld%% watched" : {
+
+    },
+    "^[%lld audio track](inflect: true) · ^[%lld subtitle](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "^[%1$lld audio track](inflect: true) · ^[%2$lld subtitle](inflect: true)"
+          }
+        }
+      }
+    },
+    "^[%lld collection](inflect: true) · ^[%lld movie](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "^[%1$lld collection](inflect: true) · ^[%2$lld movie](inflect: true)"
+          }
+        }
+      }
+    },
+    "^[%lld episode](inflect: true)" : {
+
+    },
+    "^[%lld movie](inflect: true)" : {
+
+    },
+    "^[%lld movie](inflect: true) · ^[%lld show](inflect: true) · ^[%lld episode](inflect: true)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "^[%1$lld movie](inflect: true) · ^[%2$lld show](inflect: true) · ^[%3$lld episode](inflect: true)"
+          }
+        }
+      }
+    },
+    "^[%lld title](inflect: true)" : {
+
+    },
+    "© 2026 John Aldrich. All rights reserved." : {
+
+    },
+    "About" : {
+
+    },
+    "About Ultimate Theater" : {
+
+    },
+    "Action & Adventure" : {
+
+    },
+    "Add" : {
+
+    },
+    "Add a key to use %@." : {
+
+    },
+    "Add All" : {
+
+    },
+    "Add episode files named like “Show S01E01.mp4” or organized in Season folders." : {
+
+    },
+    "Add Folder…" : {
+
+    },
+    "Add movie files or a folder of movies to see them here." : {
+
+    },
+    "Add Movies & Shows" : {
+
+    },
+    "Add Movies & Shows…" : {
+
+    },
+    "Add movies and shows to fill this page." : {
+
+    },
+    "Add movies and shows to see them here." : {
+
+    },
+    "Add Movies Folder…" : {
+
+    },
+    "Add Movies…" : {
+
+    },
+    "Add or remove from My List (⌘L)" : {
+
+    },
+    "Add Profile (⇧⌘N)" : {
+
+    },
+    "Add to My List" : {
+
+    },
+    "Add TV Shows Folder…" : {
+
+    },
+    "Add TV Shows…" : {
+
+    },
+    "Add your movies and TV shows. Ultimate Theater identifies each one and brings in posters, cast, ratings, and episode guides from TMDB, OMDb, TVmaze, and Wikipedia." : {
+
+    },
+    "Added" : {
+
+    },
+    "Added ^[%lld day](inflect: true) ago" : {
+
+    },
+    "Added today" : {
+
+    },
+    "Added yesterday" : {
+
+    },
+    "Adds and approves media and manages the library. Make another profile the administrator to change this." : {
+
+    },
+    "Adds and approves media and manages the library. Only one profile can be the administrator." : {
+
+    },
+    "Administrator" : {
+
+    },
+    "Administrator Only" : {
+
+    },
+    "Administrator PIN" : {
+
+    },
+    "Administrator PIN is set" : {
+
+    },
+    "After you first open the Cast menu, Ultimate Theater looks for Chromecast, Google TV, DLNA smart TVs, and Roku devices on your local network while a video is open. Nothing leaves your network: when you cast, the device streams the video directly from this Mac through a private, single-use link that stops working when casting ends." : {
+
+    },
+    "All Genres" : {
+
+    },
+    "All profiles, the library, watch history, My Lists, ratings, settings, and API keys are erased. This can't be undone. Your movie files stay where they are." : {
+
+    },
+    "All ratings" : {
+
+    },
+    "All titles are identified and playable." : {
+
+    },
+    "Allow iPhone Remote" : {
+
+    },
+    "Alphabet index" : {
+
+    },
+    "Always Use These Settings" : {
+
+    },
+    "An OpenSubtitles API key is needed" : {
+
+    },
+    "Animation" : {
+
+    },
+    "Any %@" : {
+
+    },
+    "API key" : {
+
+    },
+    "API Key" : {
+
+    },
+    "API key or read access token" : {
+
+    },
+    "Apple TV" : {
+
+    },
+    "Are you still watching %@?" : {
+
+    },
+    "Artwork" : {
+
+    },
+    "Audio" : {
+
+    },
+    "Audio track" : {
+
+    },
+    "Back" : {
+
+    },
+    "Back 10 seconds" : {
+
+    },
+    "Back 10 Seconds" : {
+
+    },
+    "Back 10 seconds (←)" : {
+
+    },
+    "Back to all genres" : {
+
+    },
+    "Back to Browsing" : {
+
+    },
+    "Backdrop URL" : {
+
+    },
+    "Because You Watched %@" : {
+
+    },
+    "Both are SQLite databases. The master library holds titles, episodes, and watched folders; the user database holds profiles, watch progress, My Lists, and ratings." : {
+
+    },
+    "Browse" : {
+
+    },
+    "Browse by Genre" : {
+
+    },
+    "Browse Home" : {
+
+    },
+    "Build Your Home Theater" : {
+
+    },
+    "Can't Play “%@”" : {
+
+    },
+    "Cancel" : {
+
+    },
+    "Cast" : {
+
+    },
+    "Cast to a TV or streaming device" : {
+
+    },
+    "Casting" : {
+
+    },
+    "Casting sends the original file to the device, which must be able to play its format; nothing is converted. Fire TV, Samsung, LG, and other smart TVs appear under DLNA when they offer it (on Fire TV, through a DLNA player app). Your Mac must stay awake and on the same network while casting." : {
+
+    },
+    "Change Key…" : {
+
+    },
+    "Change Picture…" : {
+
+    },
+    "Change PIN…" : {
+
+    },
+    "Change your rating" : {
+
+    },
+    "Change…" : {
+
+    },
+    "Check" : {
+
+    },
+    "Check File for Damage…" : {
+
+    },
+    "Check Key" : {
+
+    },
+    "Checking this file's format…" : {
+
+    },
+    "Checking whether this file can play over AirPlay…" : {
+
+    },
+    "Choose a profile to edit or remove it" : {
+
+    },
+    "Choose an AirPlay device" : {
+
+    },
+    "Choose another AirPlay device" : {
+
+    },
+    "Choose Picture…" : {
+
+    },
+    "Clear" : {
+
+    },
+    "Clear all filters" : {
+
+    },
+    "Clear Filters" : {
+
+    },
+    "Clear Rating" : {
+
+    },
+    "Close" : {
+
+    },
+    "Code" : {
+
+    },
+    "COLLECTION" : {
+
+    },
+    "Collection Unavailable" : {
+
+    },
+    "Collections" : {
+
+    },
+    "Collections built from your library and watch history" : {
+
+    },
+    "Color %lld" : {
+
+    },
+    "Comedies" : {
+
+    },
+    "Connected" : {
+
+    },
+    "Content ratings" : {
+
+    },
+    "Content Ratings" : {
+
+    },
+    "Continue" : {
+
+    },
+    "Continue Watching" : {
+
+    },
+    "Continue with %@" : {
+
+    },
+    "Control playback from a phone on the same Wi-Fi: play and pause, skip, change audio and subtitles, or start something from Continue Watching. Only devices on your local network can connect, and each one must be paired first. The connection isn't encrypted, so use it only on a Wi-Fi network you trust; pairings lapse after 30 days unused, and you can revoke them here." : {
+
+    },
+    "Couldn't Search" : {
+
+    },
+    "Create a new profile (⌘N)" : {
+
+    },
+    "Create Profile" : {
+
+    },
+    "Critics' favorites in your library" : {
+
+    },
+    "Databases" : {
+
+    },
+    "Delete" : {
+
+    },
+    "Delete “%@”?" : {
+
+    },
+    "Didn't work" : {
+
+    },
+    "Director" : {
+
+    },
+    "Dismiss" : {
+
+    },
+    "Done" : {
+
+    },
+    "Done (Esc)" : {
+
+    },
+    "Download" : {
+
+    },
+    "Dramas" : {
+
+    },
+    "Drop a picture here to use it for this profile" : {
+
+    },
+    "Drop to Add to Your Library" : {
+
+    },
+    "Each phone will need to be paired again." : {
+
+    },
+    "Edge-of-Your-Seat Thrillers" : {
+
+    },
+    "Edit %@" : {
+
+    },
+    "Edit Info…" : {
+
+    },
+    "Edit Profile" : {
+
+    },
+    "Edit Profile…" : {
+
+    },
+    "Elapsed %@" : {
+
+    },
+    "Episode %lld, %@%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Episode %1$lld, %2$@%3$@"
+          }
+        }
+      }
+    },
+    "Episodes" : {
+
+    },
+    "Episodes finished" : {
+
+    },
+    "Erase Everything and Reset" : {
+
+    },
+    "Erases the library, every profile, watch history, settings, saved API keys, and caches, and returns the app to its first-launch state. Your movie files aren't touched." : {
+
+    },
+    "Every file plays with the built-in Theater engine. Containers: MP4, M4V, MOV, 3GP, MKV, WebM, AVI, MPEG-TS and Blu-ray/AVCHD M2TS, MPEG program streams (MPG, VOB), Ogg, FLV, and DV. Video: H.264, HEVC (including HDR10, HLG, and Dolby Vision), AV1, VP9, VP8, Theora, MPEG-1, MPEG-2, MPEG-4 Part 2 (Xvid/DivX), H.263, Apple ProRes, DV, and Motion JPEG. Audio: AAC (including LATM broadcast audio), Apple Lossless, FLAC, Opus, Vorbis, Dolby Digital, Dolby Digital Plus, Dolby TrueHD (lossless, including Atmos beds), DTS (core, including DTS-HD tracks), MP3, MP2, PCM and LPCM, ADPCM, µ-law, A-law, and AMR. Subtitles: SRT, ASS/SSA, MP4 text, Blu-ray PGS, DVD subtitles, DVB subtitles, and Teletext. Files using other formats are added and flagged." : {
+
+    },
+    "Everything (%lld)" : {
+
+    },
+    "Everything Looks Good" : {
+
+    },
+    "Expires in %@" : {
+
+    },
+    "Fantasy Worlds" : {
+
+    },
+    "Favorite Genres" : {
+
+    },
+    "Favourite Scenes" : {
+
+    },
+    "Featured: %@" : {
+
+    },
+    "Fetch info automatically when adding media" : {
+
+    },
+    "Fetch the latest info for every title in %@" : {
+
+    },
+    "Filter by %@" : {
+
+    },
+    "Find casting devices on this network" : {
+
+    },
+    "Find movies, shows, actors, and directors. Press ⌘F anytime." : {
+
+    },
+    "Find Subtitles" : {
+
+    },
+    "Find Subtitles…" : {
+
+    },
+    "Finding casting devices is turned off. Turn on “Find casting devices on this network” in Settings › Playback." : {
+
+    },
+    "Finds and downloads subtitles for movies and episodes that have none. A free key allows a few downloads a day; signing in with an OpenSubtitles account raises the limit." : {
+
+    },
+    "Finds damage in the file and saves a repaired copy." : {
+
+    },
+    "Fix Match" : {
+
+    },
+    "Fix Match…" : {
+
+    },
+    "Folders" : {
+
+    },
+    "Folders you add are listed here and can be rescanned for new videos." : {
+
+    },
+    "For the deaf and hard of hearing: includes sound descriptions" : {
+
+    },
+    "For the Whole Family" : {
+
+    },
+    "Forgot PIN? Use Mac Password…" : {
+
+    },
+    "Format" : {
+
+    },
+    "Formats" : {
+
+    },
+    "Forward 10 seconds" : {
+
+    },
+    "Forward 10 Seconds" : {
+
+    },
+    "Forward 10 seconds (→)" : {
+
+    },
+    "Found %@" : {
+
+    },
+    "Found by this file's fingerprint, so its timing should line up exactly" : {
+
+    },
+    "Full Screen (F)" : {
+
+    },
+    "Genre" : {
+
+    },
+    "Genres" : {
+
+    },
+    "Genres appear once titles have been identified." : {
+
+    },
+    "Get a free key" : {
+
+    },
+    "Get a Free Key" : {
+
+    },
+    "Get a Key" : {
+
+    },
+    "Get Started" : {
+
+    },
+    "Hide episodes" : {
+
+    },
+    "Highly Rated" : {
+
+    },
+    "Horror" : {
+
+    },
+    "Hours" : {
+
+    },
+    "Household administrator" : {
+
+    },
+    "Identify %lld Unmatched" : {
+
+    },
+    "Ignore “%@”?" : {
+
+    },
+    "Ignore %lld new videos?" : {
+
+    },
+    "Ignore All" : {
+
+    },
+    "Ignore All…" : {
+
+    },
+    "Ignore Video" : {
+
+    },
+    "Ignore…" : {
+
+    },
+    "Ignored videos aren't added to your library. The files stay on your Mac." : {
+
+    },
+    "In My List" : {
+
+    },
+    "In progress" : {
+
+    },
+    "In Progress" : {
+
+    },
+    "Info From" : {
+
+    },
+    "iPhone Remote" : {
+
+    },
+    "Its file can't be found. You can add it again later if it turns up." : {
+
+    },
+    "Jump to %@" : {
+
+    },
+    "Just This Time" : {
+
+    },
+    "Key saved  ••••%@" : {
+
+    },
+    "Kids profiles show titles rated G, PG, TV-Y, TV-Y7, TV-G, or TV-PG. Ratings appear once titles are identified." : {
+
+    },
+    "Language" : {
+
+    },
+    "Last 12 Weeks" : {
+
+    },
+    "Let's set things up. In a few steps you'll create your profile, add your movies and shows, and choose how titles are rated for your household." : {
+
+    },
+    "Library" : {
+
+    },
+    "Library Actions" : {
+
+    },
+    "Limits" : {
+
+    },
+    "Lock info" : {
+
+    },
+    "Lock with PIN" : {
+
+    },
+    "Locked titles keep your edits when info is refreshed. Ratings still update." : {
+
+    },
+    "Locked with a PIN" : {
+
+    },
+    "Log Out" : {
+
+    },
+    "Log out of %@" : {
+
+    },
+    "Login saved" : {
+
+    },
+    "Look up info automatically when titles are added" : {
+
+    },
+    "Looking for TVs and streaming devices…" : {
+
+    },
+    "Made for You" : {
+
+    },
+    "Manage Key" : {
+
+    },
+    "Manage Profiles" : {
+
+    },
+    "Manage Profiles (⌘E)" : {
+
+    },
+    "Manage Profiles…" : {
+
+    },
+    "Mark %@ as unwatched" : {
+
+    },
+    "Mark %@ as watched" : {
+
+    },
+    "Mark as unwatched" : {
+
+    },
+    "Mark as Unwatched" : {
+
+    },
+    "Mark as watched" : {
+
+    },
+    "Mark as Watched" : {
+
+    },
+    "Mark episode %lld as unwatched" : {
+
+    },
+    "Mark episode %lld as watched" : {
+
+    },
+    "Mark Episode as Unwatched" : {
+
+    },
+    "Mark Episode as Watched" : {
+
+    },
+    "Mark Season %lld as Unwatched" : {
+
+    },
+    "Mark Season %lld as Watched" : {
+
+    },
+    "Mark Series as Unwatched" : {
+
+    },
+    "Mark Series as Watched" : {
+
+    },
+    "Metadata" : {
+
+    },
+    "Metadata Sources…" : {
+
+    },
+    "Mind-Bending Sci-Fi" : {
+
+    },
+    "More Info" : {
+
+    },
+    "More Like This" : {
+
+    },
+    "Most-Watched Shows" : {
+
+    },
+    "Move All Episode Files to Trash" : {
+
+    },
+    "Move Aside and Start Fresh" : {
+
+    },
+    "Move Damaged Library Aside and Start Fresh…" : {
+
+    },
+    "Move File to Trash" : {
+
+    },
+    "Move the damaged %@ aside?" : {
+
+    },
+    "Movie and TV information" : {
+
+    },
+    "Movies" : {
+
+    },
+    "Movies (%lld)" : {
+
+    },
+    "Movies and shows you haven't started" : {
+
+    },
+    "Movies finished" : {
+
+    },
+    "Movies that belong to a series, like The Matrix or Toy Story, are grouped here automatically. Collections come from TMDB, so add a TMDB key in Settings, then refresh your library's info." : {
+
+    },
+    "Movies, episodes, or whole folders" : {
+
+    },
+    "Movies, shows, people, genres" : {
+
+    },
+    "Moving the damaged database aside keeps the old file (renamed, next to the original) and starts that part fresh. Your movie and show files are never touched." : {
+
+    },
+    "Mute" : {
+
+    },
+    "Mute (M)" : {
+
+    },
+    "My List" : {
+
+    },
+    "Mysteries" : {
+
+    },
+    "Needs attention: ^[%lld title](inflect: true)" : {
+
+    },
+    "New Code" : {
+
+    },
+    "New Profile" : {
+
+    },
+    "New videos in this folder won't be added any more. Titles already in your library stay, and no files are deleted." : {
+
+    },
+    "Next episode" : {
+
+    },
+    "Next Episode" : {
+
+    },
+    "Next episode: %@ (⇧→)" : {
+
+    },
+    "Next: %@ · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next: %1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "No %@ info yet. It appears once titles are identified." : {
+
+    },
+    "No administrator PIN yet" : {
+
+    },
+    "No casting devices found on this network." : {
+
+    },
+    "No collection has a movie matching every filter." : {
+
+    },
+    "No Collections Yet" : {
+
+    },
+    "No damage found" : {
+
+    },
+    "No devices paired yet." : {
+
+    },
+    "No key needed" : {
+
+    },
+    "No matches" : {
+
+    },
+    "No Matches" : {
+
+    },
+    "No metadata source recognized this title. Right-click and choose Fix Match." : {
+
+    },
+    "No Metadata Sources" : {
+
+    },
+    "No Movies Yet" : {
+
+    },
+    "No next episode" : {
+
+    },
+    "No PIN" : {
+
+    },
+    "No previous episode" : {
+
+    },
+    "No profiles yet." : {
+
+    },
+    "No Subtitles Found" : {
+
+    },
+    "No Titles" : {
+
+    },
+    "No titles match every filter. Try removing some selections." : {
+
+    },
+    "No TV Shows Yet" : {
+
+    },
+    "No Watch History Yet" : {
+
+    },
+    "None of this collection's movies are in your library anymore." : {
+
+    },
+    "Not in Library" : {
+
+    },
+    "Not rated" : {
+
+    },
+    "Nothing Here for Kids Yet" : {
+
+    },
+    "Nothing here yet." : {
+
+    },
+    "Nothing to Show" : {
+
+    },
+    "Nothing yet." : {
+
+    },
+    "Now playing" : {
+
+    },
+    "Number %lld, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Number %1$lld, %2$@"
+          }
+        }
+      }
+    },
+    "Off" : {
+
+    },
+    "OMDb" : {
+
+    },
+    "On" : {
+
+    },
+    "Only foreign-language dialogue" : {
+
+    },
+    "Only the administrator's profile can turn the iPhone remote on or off." : {
+
+    },
+    "Only the household administrator can change these settings." : {
+
+    },
+    "Open" : {
+
+    },
+    "Open in %@" : {
+
+    },
+    "Open Settings" : {
+
+    },
+    "Opening this profile needs its PIN" : {
+
+    },
+    "OpenSubtitles" : {
+
+    },
+    "OpenSubtitles has no %@ subtitles for this %@. Try another language." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "OpenSubtitles has no %1$@ subtitles for this %2$@. Try another language."
+          }
+        }
+      }
+    },
+    "Optional" : {
+
+    },
+    "Page" : {
+
+    },
+    "Pair a Phone" : {
+
+    },
+    "Paired %@ · last used %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Paired %1$@ · last used %2$@"
+          }
+        }
+      }
+    },
+    "Paired Devices" : {
+
+    },
+    "Pairing QR code" : {
+
+    },
+    "Pairing stopped after too many wrong codes." : {
+
+    },
+    "Part of %@" : {
+
+    },
+    "Password" : {
+
+    },
+    "Paste your %@ API key" : {
+
+    },
+    "Pause" : {
+
+    },
+    "Paused" : {
+
+    },
+    "PG-13, TV-MA, …" : {
+
+    },
+    "Pick up right where you left off" : {
+
+    },
+    "Picture in picture" : {
+
+    },
+    "Picture in Picture" : {
+
+    },
+    "Picture in picture player" : {
+
+    },
+    "Picture in Picture: keep watching while you browse (Esc)" : {
+
+    },
+    "Play" : {
+
+    },
+    "Play from %@" : {
+
+    },
+    "Play from here" : {
+
+    },
+    "Play from the Beginning" : {
+
+    },
+    "Play Now" : {
+
+    },
+    "Play on Apple TV (AirPlay)" : {
+
+    },
+    "Play the next episode automatically" : {
+
+    },
+    "Play/Pause" : {
+
+    },
+    "Play/Pause (Space)" : {
+
+    },
+    "Playback" : {
+
+    },
+    "Playback by the Ultimate Theater engine and Apple media frameworks." : {
+
+    },
+    "Playback position" : {
+
+    },
+    "Playing on Apple TV" : {
+
+    },
+    "Poster URL" : {
+
+    },
+    "Press 1–%lld to choose a profile" : {
+
+    },
+    "Previous episode" : {
+
+    },
+    "Previous Episode" : {
+
+    },
+    "Previous episode: %@ (⇧←)" : {
+
+    },
+    "PRIMARY" : {
+
+    },
+    "Profile" : {
+
+    },
+    "Profiles" : {
+
+    },
+    "Quit" : {
+
+    },
+    "Rate" : {
+
+    },
+    "Rate this title" : {
+
+    },
+    "Rated %@" : {
+
+    },
+    "Rating" : {
+
+    },
+    "Ratings appear after titles are identified by OMDb, TMDB, or TVmaze." : {
+
+    },
+    "Ratings country" : {
+
+    },
+    "Re-fetches info for every title. Locked titles keep your edits." : {
+
+    },
+    "Reading the file…" : {
+
+    },
+    "Ready to repair" : {
+
+    },
+    "Real Stories" : {
+
+    },
+    "Recently Added" : {
+
+    },
+    "Recently Finished" : {
+
+    },
+    "Recently Watched" : {
+
+    },
+    "Recommended" : {
+
+    },
+    "Refresh" : {
+
+    },
+    "Refresh All Info" : {
+
+    },
+    "Refresh Info" : {
+
+    },
+    "Refresh info for %@" : {
+
+    },
+    "Refresh info for the titles in this folder" : {
+
+    },
+    "Refresh, fix, or edit this title's info" : {
+
+    },
+    "Released %@" : {
+
+    },
+    "Released %@–%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Released %1$@–%2$@"
+          }
+        }
+      }
+    },
+    "Remaining %@" : {
+
+    },
+    "Remove “%@” from your library?" : {
+
+    },
+    "Remove %@?" : {
+
+    },
+    "Remove %lld titles from your library?" : {
+
+    },
+    "Remove from Continue Watching" : {
+
+    },
+    "Remove from Library" : {
+
+    },
+    "Remove from Library…" : {
+
+    },
+    "Remove from My List" : {
+
+    },
+    "Remove Profile" : {
+
+    },
+    "Remove scene at %@" : {
+
+    },
+    "Remove This Episode" : {
+
+    },
+    "Remove this scene" : {
+
+    },
+    "Remove this title from your library, or move its files to the Trash" : {
+
+    },
+    "Remove…" : {
+
+    },
+    "Removing keeps the video files on disk. Moving them to the Trash deletes them from your library and your Mac." : {
+
+    },
+    "Repair %@" : {
+
+    },
+    "Repaired copy saved." : {
+
+    },
+    "Rescan All" : {
+
+    },
+    "Rescan Folders" : {
+
+    },
+    "Rescan Library Folders" : {
+
+    },
+    "Reset" : {
+
+    },
+    "Reset Ultimate Theater?" : {
+
+    },
+    "Reset Ultimate Theater…" : {
+
+    },
+    "Results for “%@”" : {
+
+    },
+    "Resume" : {
+
+    },
+    "Resume %@, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Resume %1$@, %2$@"
+          }
+        }
+      }
+    },
+    "Return to full player" : {
+
+    },
+    "Return to Player" : {
+
+    },
+    "Revoke" : {
+
+    },
+    "Revoke All" : {
+
+    },
+    "Revoke All…" : {
+
+    },
+    "Revoke every paired device?" : {
+
+    },
+    "Romance" : {
+
+    },
+    "S%lld" : {
+
+    },
+    "Save" : {
+
+    },
+    "Save movies and shows you want to watch next. Use the + button on any title, or right-click a poster." : {
+
+    },
+    "Save Repaired Copy…" : {
+
+    },
+    "Save Scene" : {
+
+    },
+    "Save this moment to Favourite Scenes (B)" : {
+
+    },
+    "Saved scene at %@" : {
+
+    },
+    "Scan the code with the iPhone's Camera, or open the address in Safari and type the six-digit code. A code works once and expires after 10 minutes." : {
+
+    },
+    "Scanned %@" : {
+
+    },
+    "Search" : {
+
+    },
+    "Search %@" : {
+
+    },
+    "Search Again" : {
+
+    },
+    "Search for the correct %@. Info, artwork, and ratings will be replaced." : {
+
+    },
+    "Search the network again" : {
+
+    },
+    "Searching %@…" : {
+
+    },
+    "Searching OpenSubtitles…" : {
+
+    },
+    "Season" : {
+
+    },
+    "See All" : {
+
+    },
+    "See every movie in this collection" : {
+
+    },
+    "Set Administrator PIN…" : {
+
+    },
+    "Set an administrator PIN so this profile can't switch to a less restricted one." : {
+
+    },
+    "Set PIN…" : {
+
+    },
+    "Settings Unavailable" : {
+
+    },
+    "Show" : {
+
+    },
+    "Show %@" : {
+
+    },
+    "Show episodes" : {
+
+    },
+    "Show in Finder" : {
+
+    },
+    "Show unrated titles" : {
+
+    },
+    "Shows completed" : {
+
+    },
+    "Signed in as" : {
+
+    },
+    "Signed in as %@, Administrator. Switch profile" : {
+
+    },
+    "Signed in as %@. Switch profile" : {
+
+    },
+    "Skip" : {
+
+    },
+    "Skip Intro or Credits" : {
+
+    },
+    "Sort" : {
+
+    },
+    "Sort titles" : {
+
+    },
+    "Sound output" : {
+
+    },
+    "Sound Output" : {
+
+    },
+    "Specials" : {
+
+    },
+    "Starring" : {
+
+    },
+    "Start Over" : {
+
+    },
+    "Start Watching" : {
+
+    },
+    "Started but not finished" : {
+
+    },
+    "Statistics appear here once %@ starts watching." : {
+
+    },
+    "Status" : {
+
+    },
+    "Step %lld of %lld: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Step %1$lld of %2$lld: %3$@"
+          }
+        }
+      }
+    },
+    "Stop" : {
+
+    },
+    "Stop and close" : {
+
+    },
+    "Stop and close player" : {
+
+    },
+    "Stop Casting" : {
+
+    },
+    "Stop watching “%@”?" : {
+
+    },
+    "Stop watching %@" : {
+
+    },
+    "Stop Watching Folder" : {
+
+    },
+    "Stop watching this folder (titles stay in your library)" : {
+
+    },
+    "Subtitle: %@" : {
+
+    },
+    "Subtitles" : {
+
+    },
+    "Subtitles are provided by OpenSubtitles.com under its terms of service. Only your key, your OpenSubtitles login, and what's being searched for (title, year, episode, and a fingerprint of the file) are sent." : {
+
+    },
+    "Subtitles come from OpenSubtitles.com. Create a free API consumer on opensubtitles.com, then add its key in Settings → Metadata." : {
+
+    },
+    "Subtitles from OpenSubtitles.com" : {
+
+    },
+    "Subtitles: %@" : {
+
+    },
+    "Subtitles: Off" : {
+
+    },
+    "Switch Profile" : {
+
+    },
+    "Switch Profile…" : {
+
+    },
+    "Switch to Administrator…" : {
+
+    },
+    "Synopsis" : {
+
+    },
+    "Tagline" : {
+
+    },
+    "Test Connection" : {
+
+    },
+    "The %@s" : {
+
+    },
+    "The file's structure is intact. If it still won't play, its video or audio format may not be supported." : {
+
+    },
+    "The newest additions to your library" : {
+
+    },
+    "The original file isn't changed. A repaired copy is saved where you choose." : {
+
+    },
+    "The remote couldn't start." : {
+
+    },
+    "The video files stay on your Mac." : {
+
+    },
+    "The video files stay on your Mac. You can add them again at any time." : {
+
+    },
+    "THEATER" : {
+
+    },
+    "These folders are watched for new videos, which you approve in Library before they're added." : {
+
+    },
+    "These folders are watched, including folders on network drives. Deleted videos leave the library; new ones wait for approval in Library. Titles on a disconnected drive are kept." : {
+
+    },
+    "This code has expired." : {
+
+    },
+    "This document couldn't be loaded from the app bundle." : {
+
+    },
+    "this profile" : {
+
+    },
+    "This profile's My List, watch progress, and ratings are removed too. This can't be undone." : {
+
+    },
+    "This title has no subtitles" : {
+
+    },
+    "This title has no subtitles. Search OpenSubtitles for some." : {
+
+    },
+    "This title is no longer in your library." : {
+
+    },
+    "Time is counted in the week each title was last watched." : {
+
+    },
+    "Time watched" : {
+
+    },
+    "Title" : {
+
+    },
+    "Title Removed" : {
+
+    },
+    "Titles" : {
+
+    },
+    "Titles with no known rating, such as home videos and some imports." : {
+
+    },
+    "TMDB" : {
+
+    },
+    "Toggle full screen" : {
+
+    },
+    "Toggle Full Screen" : {
+
+    },
+    "Top Rated in Your Library" : {
+
+    },
+    "Turn Off…" : {
+
+    },
+    "Turn on a source in Settings › Metadata." : {
+
+    },
+    "TV Shows" : {
+
+    },
+    "TV Shows (%lld)" : {
+
+    },
+    "TVmaze" : {
+
+    },
+    "TVmaze and Wikipedia content is licensed under CC BY-SA 4.0. OMDb's terms permit personal, non-commercial use." : {
+
+    },
+    "Type" : {
+
+    },
+    "ULTIMATE" : {
+
+    },
+    "Ultimate Theater" : {
+
+    },
+    "Ultimate Theater combines several sources. TMDB is preferred for every field it covers; the others fill in ratings, episode guides, and anything TMDB is missing." : {
+
+    },
+    "Ultimate Theater couldn't read its %@. It may be damaged, or was written by a newer version of the app." : {
+
+    },
+    "Ultimate Theater starts with an empty library; your profiles and watch history are kept. The old database is kept, renamed, next to the new one." : {
+
+    },
+    "Ultimate Theater starts with no profiles or watch history. The old database is kept, renamed, next to the new one." : {
+
+    },
+    "Ultimate Theater's library couldn't be opened. Use the main window to recover it, then reopen Settings." : {
+
+    },
+    "Unmute" : {
+
+    },
+    "Unwatched" : {
+
+    },
+    "UP NEXT" : {
+
+    },
+    "Up Next appears once an episode's credits are over (or in its last %lld seconds when no credits are found). The next episode starts when the episode ends, after a %lld-second countdown. After %lld episodes in a row with no activity, Ultimate Theater asks whether you're still watching." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Up Next appears once an episode's credits are over (or in its last %1$lld seconds when no credits are found). The next episode starts when the episode ends, after a %2$lld-second countdown. After %3$lld episodes in a row with no activity, Ultimate Theater asks whether you're still watching."
+          }
+        }
+      }
+    },
+    "UP NEXT IN %lld" : {
+
+    },
+    "Up Next still appears at the end of each episode, but the next one only starts when you choose Play Now." : {
+
+    },
+    "Up to %@" : {
+
+    },
+    "Use for This Movie Only" : {
+
+    },
+    "Use for This Show Only" : {
+
+    },
+    "Use Icon Instead" : {
+
+    },
+    "Use in Library" : {
+
+    },
+    "Use the AirPlay button to watch this on an Apple TV." : {
+
+    },
+    "Use these audio and subtitle settings every time?" : {
+
+    },
+    "Use This Match" : {
+
+    },
+    "Username" : {
+
+    },
+    "View" : {
+
+    },
+    "View Details" : {
+
+    },
+    "Volume" : {
+
+    },
+    "Volume down" : {
+
+    },
+    "Volume on %@" : {
+
+    },
+    "Volume up" : {
+
+    },
+    "Waiting for Approval" : {
+
+    },
+    "Waiting for the network…" : {
+
+    },
+    "Watch on This Mac" : {
+
+    },
+    "Watch Stats" : {
+
+    },
+    "Watch the trailer (⇧⌘T)" : {
+
+    },
+    "Watched" : {
+
+    },
+    "Watched · Click to mark as unwatched" : {
+
+    },
+    "Watched Folders" : {
+
+    },
+    "Week" : {
+
+    },
+    "Welcome to your theater" : {
+
+    },
+    "What %@ has been watching" : {
+
+    },
+    "What you've watched lately, newest first" : {
+
+    },
+    "When set, the administrator PIN is needed to add, edit, or remove profiles, to reset the app, and to leave a profile with a content limit for one with a higher limit. A profile with a limit stays in effect even after logging out, until the PIN is entered." : {
+
+    },
+    "Who's watching?" : {
+
+    },
+    "Wikipedia" : {
+
+    },
+    "Without TMDB, details and artwork come only from the other sources and may be incomplete." : {
+
+    },
+    "Year" : {
+
+    },
+    "YOU" : {
+
+    },
+    "You can add profiles for children with a content limit right after setup." : {
+
+    },
+    "You're all set, %@" : {
+
+    },
+    "Your Library Couldn't Be Opened" : {
+
+    },
+    "Your library is still being scanned. Titles appear as they're found." : {
+
+    },
+    "Your library now uses the repaired copy." : {
+
+    },
+    "Your List Is Empty" : {
+
+    },
+    "Your movies. Your theater." : {
+
+    },
+    "Your name" : {
+
+    },
+    "Your rating" : {
+
+    },
+    "Your Rating" : {
+
+    },
+    "Your rating: %@ out of 10" : {
+
+    },
+    "Your theater is ready. Add more profiles any time from the profile screen." : {
+
+    }
+  },
+  "version" : "1.0"
+}

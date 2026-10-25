@@ -45,8 +45,18 @@ nonisolated struct DecodedPicture: Sendable {
         self.chromaStride = chromaStride
     }
 
+    /// The planes are large enough for the stated size and strides (a decoder bug or damaged
+    /// header can't make the copy read past them).
+    var hasValidPlanes: Bool {
+        guard width > 0, height > 0, yStride >= width, chromaStride >= chromaWidth else { return false }
+        return y.count >= (height - 1) * yStride + width
+            && u.count >= (chromaHeight - 1) * chromaStride + chromaWidth
+            && v.count >= (chromaHeight - 1) * chromaStride + chromaWidth
+    }
+
     /// Copies the picture into a new bi-planar 4:2:0 video-range pixel buffer.
     func pixelBuffer() -> CVPixelBuffer? {
+        guard hasValidPlanes else { return nil }
         var buffer: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
         guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,

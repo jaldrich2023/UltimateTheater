@@ -52,7 +52,12 @@ nonisolated final class FLVDemuxer: MediaDemuxer {
             let type = h[0] & 0x1F
             let size = Int(h[1]) << 16 | Int(h[2]) << 8 | Int(h[3])
             let milliseconds = Int32(bitPattern: UInt32(h[7]) << 24 | UInt32(h[4]) << 16 | UInt32(h[5]) << 8 | UInt32(h[6]))
-            guard offset + 11 + UInt64(size) <= source.size, [8, 9, 18].contains(type) else { break }
+            guard offset + 11 + UInt64(size) <= source.size, [8, 9, 18].contains(type) else {
+                // A damaged tag: pick up at the next plausible tag header.
+                guard let next = try Self.nextTag(in: source, from: offset + 1) else { break }
+                offset = next
+                continue
+            }
             let body = offset + 11
             switch type {
             case 9:
@@ -78,9 +83,10 @@ nonisolated final class FLVDemuxer: MediaDemuxer {
             offset = body + UInt64(size) + 4
         }
         if var track = video {
-            track.width = track.width ?? metadata["width"].map(Int.init)
-            track.height = track.height ?? metadata["height"].map(Int.init)
-            if let rate = metadata["framerate"], rate > 0 { track.frameDuration = 1 / rate }
+            // Metadata numbers are doubles; NaN, infinite, or absurd values are ignored.
+            track.width = track.width ?? metadata["width"].flatMap(FormatValidation.dimension)
+            track.height = track.height ?? metadata["height"].flatMap(FormatValidation.dimension)
+            if let rate = metadata["framerate"], rate > 0, rate.isFinite { track.frameDuration = 1 / rate }
             video = track
         }
         self.tags = tags
@@ -88,7 +94,30 @@ nonisolated final class FLVDemuxer: MediaDemuxer {
         guard !tracks.isEmpty else { throw ContainerError.unrecognizedFormat }
         enabledTrackIDs = Set(tracks.map(\.id))
         let last = tags.map(\.time).max()
-        duration = metadata["duration"].flatMap { $0 > 0 ? $0 : nil } ?? last
+        duration = FormatValidation.duration(metadata["duration"]).flatMap { $0 > 0 ? $0 : nil } ?? last
+    }
+
+    /// Finds the next plausible tag header at or after `start`: a known type, a zero stream ID,
+    /// and a matching PreviousTagSize after its body. Scans at most 32 MB.
+    private static func nextTag(in source: FileByteSource, from start: UInt64) throws -> UInt64? {
+        var position = start
+        let limit = min(source.size, start + (32 << 20))
+        while position + 15 <= limit {
+            let window = [UInt8](try source.read(at: position, count: Int(min(1 << 20, limit - position))))
+            guard window.count >= 15 else { return nil }
+            for i in 0...(window.count - 15) where window[i] & 0xC0 == 0 && [8, 9, 18].contains(window[i] & 0x1F)
+                && window[i + 8] == 0 && window[i + 9] == 0 && window[i + 10] == 0 {
+                let size = UInt64(window[i + 1]) << 16 | UInt64(window[i + 2]) << 8 | UInt64(window[i + 3])
+                let candidate = position + UInt64(i)
+                guard candidate + 15 + size <= source.size else { continue }
+                let trailer = [UInt8](try source.read(at: candidate + 11 + size, count: 4))
+                guard trailer.count == 4 else { continue }
+                let previous = UInt64(trailer[0]) << 24 | UInt64(trailer[1]) << 16 | UInt64(trailer[2]) << 8 | UInt64(trailer[3])
+                if previous == size + 11 { return candidate }
+            }
+            position += UInt64(window.count - 14)
+        }
+        return nil
     }
 
     // MARK: Reading

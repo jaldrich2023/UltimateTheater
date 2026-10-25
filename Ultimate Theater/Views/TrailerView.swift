@@ -15,6 +15,16 @@ struct TrailerView: View {
     let trailer: TrailerInfo
 
     @State private var page = WebPage()
+    /// Up to 1000 points wide, smaller when the window it's shown over is smaller.
+    @State private var width = TrailerView.fittingWidth()
+
+    /// The widest 16:9 player (plus the header) that fits inside the window, with a margin.
+    private static func fittingWidth() -> CGFloat {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return 1000 }
+        let size = window.contentLayoutRect.size
+        let byHeight = (size.height - 70 - 60) * 16 / 9
+        return max(560, min(1000, size.width - 60, byHeight))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +44,7 @@ struct TrailerView: View {
                     } label: {
                         Label("Open in \(trailer.site)", systemImage: "arrow.up.forward.app")
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                 }
                 Button("Done") { dismiss() }
                     .buttonStyle(.glassProminent)
@@ -48,7 +58,7 @@ struct TrailerView: View {
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .background(.black)
         }
-        .frame(width: 1000)
+        .frame(width: width)
         .background { AppBackground() }
         .preferredColorScheme(.dark)
         .task {

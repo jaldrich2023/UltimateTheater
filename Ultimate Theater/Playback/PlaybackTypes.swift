@@ -10,8 +10,8 @@
 import Foundation
 
 /// An audio or subtitle choice presented to the viewer.
-struct TrackOption: Identifiable, Hashable {
-    enum Kind: Hashable {
+nonisolated struct TrackOption: Identifiable, Hashable, Sendable {
+    enum Kind: Hashable, Sendable {
         case audio
         case subtitle
     }
@@ -54,20 +54,20 @@ struct TrackOption: Identifiable, Hashable {
     }
 }
 
-struct MediaTrackList: Equatable {
+nonisolated struct MediaTrackList: Equatable, Sendable {
     var audio: [TrackOption] = []
     var subtitles: [TrackOption] = []
 
     var isEmpty: Bool { audio.isEmpty && subtitles.isEmpty }
 }
 
-struct PlaybackChapter: Hashable {
+nonisolated struct PlaybackChapter: Hashable, Sendable {
     let title: String
     let start: Double
     let end: Double?
 }
 
-struct SubtitleCue: Hashable {
+nonisolated struct SubtitleCue: Hashable, Sendable {
     let start: Double
     /// Open-ended (infinity) for image subtitles until a later display set clears them.
     var end: Double
@@ -78,7 +78,7 @@ struct SubtitleCue: Hashable {
 // MARK: - Preferences
 
 /// What to pick when playback starts. Language-based so it carries across titles.
-struct TrackPreference: Codable, Hashable {
+nonisolated struct TrackPreference: Codable, Hashable, Sendable {
     var languageCode: String?
     var name: String?
     var isForced = false
@@ -100,8 +100,8 @@ struct TrackPreference: Codable, Hashable {
     }
 }
 
-struct PlaybackSelection: Codable, Hashable {
-    enum Subtitles: Codable, Hashable {
+nonisolated struct PlaybackSelection: Codable, Hashable, Sendable {
+    enum Subtitles: Codable, Hashable, Sendable {
         /// Let the file decide (forced subtitles in the audio language, if any).
         case automatic
         case off
@@ -158,10 +158,6 @@ final class PlaybackPreferences {
 
     func selection(profileID: String, titleID: String) -> PlaybackSelection? {
         stored.titles[profileID]?[titleID] ?? stored.defaults[profileID]
-    }
-
-    func hasSavedSelection(profileID: String, titleID: String) -> Bool {
-        selection(profileID: profileID, titleID: titleID) != nil
     }
 
     /// Forgets every saved choice.

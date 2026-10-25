@@ -28,7 +28,7 @@ nonisolated struct OMDbProvider: MetadataProvider {
                 year: MetadataText.year(in: result.year),
                 kind: query.kind,
                 overview: nil,
-                posterURL: MetadataText.value(result.poster).flatMap(URL.init(string:))
+                posterURL: MetadataText.value(result.poster).flatMap(ArtworkCache.webArtworkURL(string:))
             )
         }
     }
@@ -41,6 +41,7 @@ nonisolated struct OMDbProvider: MetadataProvider {
     }
 
     func lookup(imdbID: String, query: MetadataQuery) async throws -> MetadataRecord? {
+        guard MetadataIDs.isIMDb(imdbID) else { return nil }
         let details: Details = try await get([URLQueryItem(name: "i", value: imdbID), URLQueryItem(name: "plot", value: "full")])
         guard try validate(details.response, error: details.error) != false else { return nil }
 
@@ -57,7 +58,7 @@ nonisolated struct OMDbProvider: MetadataProvider {
         // "Jonathan Nolan (screenplay), Christopher Nolan (story)" → names only.
         record.writers = MetadataText.list(details.writer).map { $0.replacing(/\s*\([^)]*\)/, with: "") }
         record.studios = MetadataText.list(details.production)
-        record.posterURL = MetadataText.value(details.poster).flatMap(URL.init(string:))
+        record.posterURL = MetadataText.value(details.poster).flatMap(ArtworkCache.webArtworkURL(string:))
         record.ratings = (details.ratings ?? []).compactMap(Self.rating(from:))
         return record
     }
@@ -69,7 +70,7 @@ nonisolated struct OMDbProvider: MetadataProvider {
         var components = URLComponents(string: "https://www.omdbapi.com/")
         components?.queryItems = items + [URLQueryItem(name: "apikey", value: apiKey)]
         guard let url = components?.url else { throw MetadataError.badResponse }
-        return try await HTTPClient.get(T.self, from: url, provider: id)
+        return try await HTTPClient.get(T.self, from: url, containsSecret: true, provider: id)
     }
 
     /// OMDb reports errors in the body with HTTP 200. Returns `false` for "not found".

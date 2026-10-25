@@ -150,7 +150,7 @@ struct TitleFilterBar: View {
                         Label("Clear", systemImage: "xmark.circle.fill")
                             .font(.subheadline.weight(.semibold))
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.theaterGlass)
                     .help("Clear all filters")
                     .transition(.opacity)
                 }
@@ -201,7 +201,7 @@ private struct FacetFilterButton: View {
         }
 
         if selection.isEmpty {
-            button.buttonStyle(.glass)
+            button.buttonStyle(.theaterGlass)
         } else {
             button.buttonStyle(.glassProminent).tint(Theme.accent)
         }
@@ -292,6 +292,8 @@ struct AlphabetIndex: View {
     let onSelect: (Character) -> Void
 
     @State private var hovered: Character?
+    /// Largest letter size; grows with the viewer's text size when the strip has room.
+    @ScaledMetric(relativeTo: .caption2) private var maxLetterSize: CGFloat = 12
 
     var body: some View {
         GeometryReader { proxy in
@@ -302,7 +304,7 @@ struct AlphabetIndex: View {
                         onSelect(character)
                     } label: {
                         Text(String(character))
-                            .font(.system(size: min(max(rowHeight * 0.62, 8), 12), weight: .bold, design: .rounded))
+                            .font(.system(size: min(max(rowHeight * 0.62, 8), maxLetterSize), weight: .bold, design: .rounded))
                             .foregroundStyle(color(for: character))
                             .frame(width: 24, height: rowHeight)
                             .scaleEffect(current == character ? 1.25 : 1)
@@ -341,77 +343,112 @@ struct AlphabetIndex: View {
 // MARK: - Filterable grid
 
 /// Poster grid with a header, sort menu, facet filters, and the A–Z jump index.
+///
+/// The filtered, sorted results (and the letters they cover) are cached in state and only
+/// rebuilt when the titles, filters, sort, or ratings change. Scrolling lives in a child view,
+/// so the scroll position updating on every row doesn't re-run any of that work here.
 struct FilterableTitleGrid: View {
     @Environment(AppModel.self) private var model
-    @Query private var allRatings: [UserRating]
+    /// Only this profile's ratings.
+    @Query private var profileRatings: [UserRating]
 
-    let heading: String
+    private let heading: Text
     let titles: [Title]
     /// Label for an add button in the header (e.g. "Add Movies"), when adding fits this page.
     var addLabel: String?
 
     @State private var filter: TitleFilter
     @State private var sort: BrowseSort
-    /// First visible title, kept in sync with scrolling.
-    @State private var topTitleID: Title.ID?
+    @State private var ascending: Bool
+    @State private var cache: GridResults?
 
-    private let columns = [GridItem(.adaptive(minimum: 160, maximum: 210), spacing: 22, alignment: .top)]
+    /// Localizable heading (string literals land in the String Catalog).
+    init(heading: LocalizedStringResource, titles: [Title], profileID: String?, addLabel: String? = nil,
+         filter: TitleFilter = TitleFilter(), sort: BrowseSort = .alphabetical) {
+        self.init(heading: Text(heading), titles: titles, profileID: profileID, addLabel: addLabel, filter: filter, sort: sort)
+    }
 
-    init(heading: String, titles: [Title], addLabel: String? = nil, filter: TitleFilter = TitleFilter(), sort: BrowseSort = .alphabetical) {
+    init(heading: Text, titles: [Title], profileID: String?, addLabel: String? = nil,
+         filter: TitleFilter = TitleFilter(), sort: BrowseSort = .alphabetical) {
         self.heading = heading
         self.titles = titles
         self.addLabel = addLabel
+        let id = profileID ?? ""
+        _profileRatings = Query(filter: #Predicate<UserRating> { $0.profileID == id })
         _filter = State(initialValue: filter)
         _sort = State(initialValue: sort)
+        _ascending = State(initialValue: sort.defaultAscending)
     }
 
     /// This profile's own ratings, by title.
     private var ratings: [String: Double] {
-        let profileID = model.profile?.id
-        return Dictionary(allRatings.filter { $0.profileID == profileID }.map { ($0.titleID, $0.score) },
-                          uniquingKeysWith: { first, _ in first })
+        Dictionary(profileRatings.map { ($0.titleID, $0.score) }, uniquingKeysWith: { first, _ in first })
     }
 
-    private var results: [Title] {
-        sort.apply(filter.apply(titles, ratings: ratings), ratings: ratings)
+    /// Sort order and direction in one glass dropdown: a submenu per order holding its two
+    /// directions (the current choice is checked).
+    private var sortMenu: some View {
+        Menu {
+            ForEach(BrowseSort.allCases) { option in
+                Menu {
+                    ForEach([true, false], id: \.self) { isAscending in
+                        Button {
+                            withAnimation(.smooth) {
+                                sort = option
+                                ascending = isAscending
+                            }
+                        } label: {
+                            let label = isAscending ? option.directionLabels.ascending : option.directionLabels.descending
+                            if sort == option && ascending == isAscending {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Label(label, systemImage: isAscending ? "arrow.up" : "arrow.down")
+                            }
+                        }
+                    }
+                } label: {
+                    if sort == option {
+                        Label(option.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(option.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Label("\(sort.rawValue) · \(ascending ? sort.directionLabels.ascending : sort.directionLabels.descending)",
+                  systemImage: ascending ? "arrow.up" : "arrow.down")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.theaterGlass)
+        .fixedSize()
+        .help("Sort titles")
     }
 
     var body: some View {
-        let results = results
+        let ratings = ratings
+        let inputs = GridInputs(titles: titles, catalogVersion: model.catalogVersion, filter: filter, sort: sort, ascending: ascending, ratings: ratings)
+        // Only the first frame (before onChange fills the cache) works the results out inline.
+        let current = cache.flatMap { $0.inputs == inputs ? $0 : nil } ?? GridResults(inputs, version: cache?.version ?? 0)
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .lastTextBaseline) {
                     PageHeader(title: heading, subtitle: filter.isActive
-                               ? "\(results.count) of \(titles.count) titles"
-                               : "\(titles.count) titles")
-                    Picker("Sort", selection: $sort) {
-                        ForEach(BrowseSort.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .padding(.trailing, addLabel != nil && model.canManageLibrary ? 0 : pageMargin)
-                    .help("Sort titles")
+                               ? Text("\(current.titles.count) of ^[\(titles.count) title](inflect: true)")
+                               : Text("^[\(titles.count) title](inflect: true)"))
                     if addLabel != nil, model.canManageLibrary {
                         // Re-fetches info for this library only, not every title everywhere.
                         Button {
-                            let ids = titles.map(\.id)
-                            Task { await model.library.refreshMetadata(for: ids, force: true) }
+                            model.refreshInfo(for: titles.map(\.id))
                         } label: {
                             Label("Refresh Info", systemImage: "arrow.clockwise")
                         }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.theaterGlass)
                         .disabled(model.library.isBusy || titles.isEmpty)
-                        .help("Fetch the latest info for every title in \(heading)")
+                        .help(Text("Fetch the latest info for every title in \(heading)"))
                     }
-                    if let addLabel, model.canManageLibrary {
-                        Button { model.addMedia() } label: {
-                            Label(addLabel, systemImage: "plus")
-                        }
-                        .buttonStyle(.glassProminent)
-                        .disabled(model.library.isBusy)
+                    // Adding media lives in the sidebar; the header's main control is the sort.
+                    sortMenu
                         .padding(.trailing, pageMargin)
-                        .help("\(addLabel) to your library")
-                    }
                 }
                 TitleFilterBar(titles: titles, ratings: ratings, filter: $filter)
                     .padding(.horizontal, pageMargin)
@@ -419,64 +456,135 @@ struct FilterableTitleGrid: View {
             .padding(.top, 28)
             .padding(.bottom, 12)
 
-            HStack(spacing: 0) {
-                ScrollView {
-                    if results.isEmpty {
-                        ContentUnavailableView {
-                            Label("No Matches", systemImage: "line.3.horizontal.decrease.circle")
-                        } description: {
-                            Text("No titles match every filter. Try removing some selections.")
-                        } actions: {
-                            Button("Clear Filters") { withAnimation { filter = TitleFilter() } }
-                                .buttonStyle(.glass)
-                        }
-                        .padding(.top, 60)
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 30) {
-                            ForEach(results) { title in
-                                GridPosterCard(title: title)
-                                    .id(title.id)
-                            }
-                        }
-                        .scrollTargetLayout()
-                        .padding(.leading, pageMargin)
-                        .padding(.trailing, 16)
-                        .padding(.vertical, 16)
-                        .animation(.smooth, value: results.map(\.id))
-                    }
-                }
-                .scrollPosition(id: $topTitleID, anchor: .top)
-                // Fill the width so the jump bar stays at the right edge even with few items.
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                // Outside the scroll view, so its scroll bar sits just left of the index.
-                if !results.isEmpty {
-                    AlphabetIndex(available: Set(results.map(\.indexCharacter)), current: currentLetter) { character in
-                        jump(to: character)
-                    }
-                    .frame(maxHeight: 640)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
-                }
-            }
+            TitleGridScroller(results: current, isAlphabetical: sort == .alphabetical,
+                              clearFilters: { withAnimation { filter = TitleFilter() } },
+                              switchToAlphabetical: { sort = .alphabetical; ascending = true })
         }
         .background { AppBackground() }
+        .onChange(of: inputs, initial: true) { _, inputs in
+            let version = cache?.version ?? 0
+            var rebuilt = GridResults(inputs, version: version)
+            // Bump the animation token only when the shown order actually changes.
+            if rebuilt.titles.map(\.id) != cache?.titles.map(\.id) { rebuilt.version = version + 1 }
+            cache = rebuilt
+        }
+    }
+}
+
+/// Everything a grid's results depend on; the cached results are rebuilt only when this changes.
+private struct GridInputs: Equatable {
+    let titles: [Title]
+    /// `AppModel.catalogVersion` when `titles` was taken: any edit to a title's info
+    /// rebuilds the catalog, so equal versions plus equal IDs mean equal titles.
+    let catalogVersion: Int
+    let filter: TitleFilter
+    let sort: BrowseSort
+    let ascending: Bool
+    let ratings: [String: Double]
+
+    /// Compares the catalog version and title IDs rather than every field of every title.
+    static func == (lhs: GridInputs, rhs: GridInputs) -> Bool {
+        lhs.catalogVersion == rhs.catalogVersion && lhs.filter == rhs.filter && lhs.sort == rhs.sort
+            && lhs.ascending == rhs.ascending && lhs.ratings == rhs.ratings
+            && lhs.titles.count == rhs.titles.count && lhs.titles.elementsEqual(rhs.titles) { $0.id == $1.id }
+    }
+}
+
+/// Filtered, sorted titles plus what the jump index needs, worked out once per change.
+private struct GridResults {
+    let inputs: GridInputs
+    let titles: [Title]
+    let available: Set<Character>
+    /// Index letter for each result, for lighting the jump bar while scrolling.
+    let letters: [Title.ID: Character]
+    /// Changes whenever the result order changes; drives the grid's re-sort animation.
+    var version: Int
+
+    var ratings: [String: Double] { inputs.ratings }
+
+    init(_ inputs: GridInputs, version: Int) {
+        self.inputs = inputs
+        titles = inputs.sort.apply(inputs.filter.apply(inputs.titles, ratings: inputs.ratings),
+                                   ratings: inputs.ratings, ascending: inputs.ascending)
+        var letters: [Title.ID: Character] = [:]
+        letters.reserveCapacity(titles.count)
+        for title in titles { letters[title.id] = title.indexCharacter }
+        self.letters = letters
+        available = Set(letters.values)
+        self.version = version
+    }
+}
+
+/// The scrolling poster grid and its jump bar. Owns the scroll position, so scrolling only
+/// re-renders this view (a dictionary lookup for the lit letter), not the filters above.
+private struct TitleGridScroller: View {
+    let results: GridResults
+    let isAlphabetical: Bool
+    let clearFilters: () -> Void
+    let switchToAlphabetical: () -> Void
+
+    /// First visible title, kept in sync with scrolling.
+    @State private var topTitleID: Title.ID?
+
+    private let columns = [GridItem(.adaptive(minimum: 160, maximum: 210), spacing: 22, alignment: .top)]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView {
+                if results.titles.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Matches", systemImage: "line.3.horizontal.decrease.circle")
+                    } description: {
+                        Text("No titles match every filter. Try removing some selections.")
+                    } actions: {
+                        Button("Clear Filters", action: clearFilters)
+                            .buttonStyle(.theaterGlass)
+                    }
+                    // Centered in the visible pane, not pinned to the top.
+                    .containerRelativeFrame([.horizontal, .vertical])
+                } else {
+                    LazyVGrid(columns: columns, spacing: 30) {
+                        ForEach(results.titles) { title in
+                            GridPosterCard(title: title, myRating: results.ratings[title.id])
+                                .id(title.id)
+                        }
+                    }
+                    .scrollTargetLayout()
+                    .padding(.leading, pageMargin)
+                    .padding(.trailing, 16)
+                    .padding(.vertical, 16)
+                    .animation(.smooth, value: results.version)
+                }
+            }
+            .scrollPosition(id: $topTitleID, anchor: .top)
+            // Fill the width so the jump bar stays at the right edge even with few items.
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Outside the scroll view, so its scroll bar sits just left of the index.
+            if !results.titles.isEmpty {
+                AlphabetIndex(available: results.available, current: currentLetter) { character in
+                    jump(to: character)
+                }
+                .frame(maxHeight: 640)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
+            }
+        }
     }
 
     /// Letter of the first visible title. Only meaningful (and shown) in A–Z order.
     private var currentLetter: Character? {
-        guard sort == .alphabetical else { return nil }
-        let visible = results
-        let top = visible.first { $0.id == topTitleID } ?? visible.first
-        return top?.indexCharacter
+        guard isAlphabetical else { return nil }
+        return topTitleID.flatMap { results.letters[$0] } ?? results.titles.first?.indexCharacter
     }
 
     /// Switches to A–Z order and scrolls to the first title at or after `character`.
     private func jump(to character: Character) {
         let order = AlphabetIndex.characters
-        let needsResort = sort != .alphabetical
-        if needsResort { sort = .alphabetical }
-        let sorted = BrowseSort.alphabetical.apply(filter.apply(titles, ratings: ratings))
+        let needsResort = !isAlphabetical
+        if needsResort { switchToAlphabetical() }
+        // Same titles, in the order the grid is about to show.
+        let sorted = needsResort ? BrowseSort.alphabetical.apply(results.titles) : results.titles
         guard let start = order.firstIndex(of: character) else { return }
         let target = order[start...].lazy.compactMap { letter in sorted.first { $0.indexCharacter == letter } }.first
             ?? sorted.last

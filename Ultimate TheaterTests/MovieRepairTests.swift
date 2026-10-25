@@ -66,26 +66,14 @@ struct MovieRepairTests {
         #expect(try await asset.load(.isPlayable))
     }
 
-    @Test func resizedSequenceParametersKeepEverythingElse() throws {
-        // SPS for 1920×816 High profile (from a real x264 encode), resized to 1920×1040.
-        let reference = try RepairReference(url: try #require(fixtureReference))
+    @Test func resizedSequenceParametersKeepEverythingElse() async throws {
+        // A 1920×816 H.264 movie written by AVAssetWriter; its SPS is resized to 1920×1040.
+        let movie = try await MovieFixture.write(.mp4, seconds: 1, width: 1920, height: 816)
+        defer { try? FileManager.default.removeItem(at: movie) }
+        let reference = try RepairReference(url: movie)
         let resized = try #require(reference.resized(widthInMacroblocks: 120, heightInMapUnits: 65))
         #expect(resized.width == 1920 && resized.height == 1040)
         #expect(resized.sps.totalMacroblocks == 120 * 65)
         #expect(resized.sps.pocType == reference.sps.pocType && resized.sps.log2MaxFrameNum == reference.sps.log2MaxFrameNum)
-    }
-
-    /// A small movie written once for the resize test.
-    private var fixtureReference: URL? {
-        get throws {
-            let semaphore = DispatchSemaphore(value: 0)
-            nonisolated(unsafe) var url: URL?
-            Task.detached {
-                url = try? await MovieFixture.write(.mp4, seconds: 1, width: 1920, height: 816)
-                semaphore.signal()
-            }
-            semaphore.wait()
-            return url
-        }
     }
 }

@@ -38,13 +38,14 @@ nonisolated struct TMDBProvider: MetadataProvider {
     }
 
     func details(for candidate: MetadataCandidate, query: MetadataQuery) async throws -> MetadataRecord {
-        guard let tmdbID = Int(candidate.externalID) else { throw MetadataError.badResponse }
+        guard let tmdbID = MetadataIDs.numeric(candidate.externalID) else { throw MetadataError.badResponse }
         return candidate.kind == .movie
             ? try await movie(id: tmdbID)
             : try await show(id: tmdbID, seasons: query.seasons)
     }
 
     func lookup(imdbID: String, query: MetadataQuery) async throws -> MetadataRecord? {
+        guard MetadataIDs.isIMDb(imdbID) else { return nil }
         let response: FindResponse = try await get("find/\(imdbID)", [URLQueryItem(name: "external_source", value: "imdb_id")])
         switch query.kind {
         case .movie:
@@ -156,7 +157,8 @@ nonisolated struct TMDBProvider: MetadataProvider {
         }
         components?.queryItems = queryItems
         guard let url = components?.url else { throw MetadataError.badResponse }
-        return try await HTTPClient.get(T.self, from: url, headers: headers, keyStrategy: .convertFromSnakeCase, provider: id)
+        return try await HTTPClient.get(T.self, from: url, headers: headers, keyStrategy: .convertFromSnakeCase,
+                                        containsSecret: true, provider: id)
     }
 
     private static func image(_ path: String?, size: String) -> URL? {

@@ -7,6 +7,7 @@
 
 import Testing
 import SQLite3
+import SwiftData
 import Foundation
 import SwiftUI
 @testable import Ultimate_Theater
@@ -318,7 +319,21 @@ struct WatchHistoryTests {
     }
 
     @Test func libraryAndUsersAreSeparateSQLiteDatabases() throws {
-        // The app host opened both databases at launch.
+        // Both stores are built in a scratch folder, never the user's real databases.
+        let folder = FileManager.default.temporaryDirectory.appending(path: "stores-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let libraryURL = folder.appending(path: "Library.store")
+        let usersURL = folder.appending(path: "Users.store")
+        do {
+            let library = try ModelContainer(for: LibraryStore.librarySchema, configurations: [
+                ModelConfiguration("Library", schema: LibraryStore.librarySchema, url: libraryURL)])
+            let users = try ModelContainer(for: LibraryStore.usersSchema, configurations: [
+                ModelConfiguration("Users", schema: LibraryStore.usersSchema, url: usersURL)])
+            try library.mainContext.save()
+            try users.mainContext.save()
+        }
+
         func tables(_ url: URL) throws -> Set<String> {
             let handle = try FileHandle(forReadingFrom: url)
             let header = try #require(try handle.read(upToCount: 16))
@@ -334,8 +349,8 @@ struct WatchHistoryTests {
             while sqlite3_step(statement) == SQLITE_ROW { names.insert(String(cString: sqlite3_column_text(statement, 0))) }
             return names
         }
-        let library = try tables(LibraryStore.databaseURL)
-        let users = try tables(LibraryStore.usersDatabaseURL)
+        let library = try tables(libraryURL)
+        let users = try tables(usersURL)
         #expect(library.contains("ZMEDIAITEM") && library.contains("ZLIBRARYFOLDER"))
         #expect(!library.contains("ZSTOREDPROFILE") && !library.contains("ZWATCHPROGRESS"))
         #expect(users.isSuperset(of: ["ZSTOREDPROFILE", "ZWATCHPROGRESS", "ZMYLISTENTRY", "ZUSERRATING"]))

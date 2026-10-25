@@ -7,10 +7,8 @@
 //  renderer plays directly. Extensions (DTS-ES, 96/24, DTS-HD) are skipped; every
 //  DTS stream carries a full core, so those still play at core quality.
 //
-//  The public specification omits two vector codebooks (clause D.10). In their place,
-//  ADPCM-predicted subbands use a predictor estimated from the subband's recent output,
-//  and high-frequency VQ subbands are filled with noise at their transmitted level. Film
-//  soundtracks at DVD and Blu-ray bit rates use either for only a few percent of subbands.
+//  The two vector codebooks the public specification omits (clause D.10: ADPCM prediction
+//  coefficients and high-frequency subband vectors) come from `DTSVectorTables`.
 //
 
 import Foundation
@@ -130,15 +128,23 @@ nonisolated struct DTSBitReader {
 
     var bitsLeft: Int { bytes.count * 8 - position }
 
+    /// Reads `count` bits MSB-first through a 64-bit window; bits past the end read as zero.
     mutating func read(_ count: Int) -> Int {
-        var value = 0
-        for _ in 0..<count {
-            let byte = position >> 3
-            let bit = byte < bytes.count ? Int(bytes[byte] >> (7 - UInt8(position & 7))) & 1 : 0
-            value = value << 1 | bit
-            position += 1
+        guard count > 0 else { return 0 }
+        if count > 57 { // More than one window holds after a partial first byte.
+            let high = read(count - 32)
+            return high << 32 | read(32)
         }
-        return value
+        let byte = position >> 3
+        var window: UInt64 = 0
+        if byte + 8 <= bytes.count {
+            for k in 0..<8 { window = window << 8 | UInt64(bytes[byte + k]) }
+        } else {
+            for k in 0..<8 { window = window << 8 | (byte + k < bytes.count ? UInt64(bytes[byte + k]) : 0) }
+        }
+        window <<= UInt64(position & 7)
+        position += count
+        return Int(truncatingIfNeeded: window >> UInt64(64 - count))
     }
 
     mutating func readBit() -> Int {
@@ -253,8 +259,6 @@ nonisolated final class DTSCoreDecoder {
     private var lfeHistory = [Double](repeating: 0, count: 8)
     /// Recent reconstructed samples of every subband, [channel][band], oldest first.
     private var subbandHistory: [[[Double]]] = []
-    /// Fills VQ-coded high subbands with noise at their transmitted level (instead of silence).
-    var fillsVectorSubbands = true
 
     func reset() {
         banks.removeAll()
@@ -355,8 +359,9 @@ nonisolated final class DTSCoreDecoder {
             reader.skip(3)                                  // PSC
             var prediction = [[Bool]](repeating: [Bool](repeating: false, count: 32), count: channels)
             for ch in 0..<channels { for n in 0..<subbands[ch] { prediction[ch][n] = reader.read(1) == 1 } }
-            // Prediction coefficient VQ addresses; the codebook (D.10.1) isn't public.
-            for ch in 0..<channels { for n in 0..<subbands[ch] where prediction[ch][n] { reader.skip(12) } }
+            // Prediction coefficient VQ addresses (codebook D.10.1).
+            var predictionIndex = [[Int]](repeating: [Int](repeating: 0, count: 32), count: channels)
+            for ch in 0..<channels { for n in 0..<subbands[ch] where prediction[ch][n] { predictionIndex[ch][n] = reader.read(12) } }
             var abits = [[Int]](repeating: [Int](repeating: 0, count: 32), count: channels)
             for ch in 0..<channels {
                 for n in 0..<vqStart[ch] {
@@ -433,13 +438,11 @@ nonisolated final class DTSCoreDecoder {
             var samples = [[[Double]]](repeating: [[Double]](repeating: [Double](repeating: 0, count: length), count: 32),
                                        count: channels)
             for ch in 0..<channels {
-                // High-frequency VQ (D.10.2 isn't public): noise at the transmitted level stands in
-                // for the codebook vector, the same vector for the same address.
+                // High-frequency VQ (D.10.2): one 32-sample vector per subband, × scale / 16.
                 for n in vqStart[ch]..<subbands[ch] {
                     let address = reader.read(10)
-                    guard fillsVectorSubbands else { continue }
-                    let level = scales[ch][n].0 * Self.vectorFillLevel
-                    for m in 0..<length { samples[ch][n][m] = level * Self.vectorNoise[address * 32 + m] }
+                    let level = scales[ch][n].0 / 16
+                    for m in 0..<length { samples[ch][n][m] = level * Double(DTSVectorTables.highFrequency[address * 32 + m]) }
                 }
                 vectorSubbands += subbands[ch] - vqStart[ch]
                 for n in 0..<subbands[ch] where prediction[ch][n] { predictedSubbands += 1 }
@@ -495,14 +498,14 @@ nonisolated final class DTSCoreDecoder {
                 }
             }
 
-            // Inverse ADPCM (C.3.3). Without the coefficient codebook, the predictor is estimated
-            // from the subband's own recent output (see `predictor`).
+            // Inverse ADPCM (C.3.3), with history carried across subframes and frames.
             for ch in 0..<channels {
                 for n in 0..<32 {
                     var history = subbandHistory[ch][n]
                     let isCoded = n < vqStart[ch] && abits[ch][n] > 0
                     if prediction[ch][n] && isCoded {
-                        let coefficients = Self.predictor(from: history)
+                        let base = predictionIndex[ch][n] * 4
+                        let coefficients = (0..<4).map { Double(DTSVectorTables.prediction[base + $0]) / 8192 }
                         var recent = Array(history.suffix(4))
                         for m in 0..<length {
                             var value = samples[ch][n][m]
@@ -580,65 +583,6 @@ nonisolated final class DTSCoreDecoder {
     }
 
     static let historyLength = 64
-
-    /// RMS of a VQ-coded subband relative to its scale factor. Coded subbands just below
-    /// the VQ range measure 0.96 (p10–p90: 0.88–1.06) across two minutes of a film soundtrack.
-    static let vectorFillLevel = 0.96
-
-    /// 1,024 fixed noise vectors of 32 samples with unit RMS, one per VQ address.
-    static let vectorNoise: [Double] = {
-        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
-        var table: [Double] = []
-        table.reserveCapacity(1024 * 32)
-        for _ in 0..<1024 {
-            var vector: [Double] = (0..<32).map { _ in
-                state ^= state << 13; state ^= state >> 7; state ^= state << 17
-                return Double(Int64(bitPattern: state) >> 11) / Double(1 << 52)
-            }
-            let rms = (vector.reduce(0) { $0 + $1 * $1 } / 32).squareRoot()
-            if rms > 0 { vector = vector.map { $0 / rms } }
-            table += vector
-        }
-        return table
-    }()
-
-    static func rms<C: Collection>(_ values: C) -> Double where C.Element == Double {
-        values.isEmpty ? 0 : (values.reduce(0) { $0 + $1 * $1 } / Double(values.count)).squareRoot()
-    }
-
-    /// A 4th-order linear predictor estimated from recent output (autocorrelation method,
-    /// so the synthesis filter is always stable), with bandwidth expansion and a cap on the
-    /// prediction gain so an unlucky estimate can't amplify the residual much.
-    static func predictor(from history: [Double]) -> [Double] {
-        let order = 4
-        var r = [Double](repeating: 0, count: order + 1)
-        let count = history.count
-        for lag in 0...order {
-            var sum = 0.0
-            for i in lag..<count { sum += history[i] * history[i - lag] }
-            r[lag] = sum
-        }
-        guard r[0] > 0 else { return [0, 0, 0, 0] }
-        r[0] *= 1.0001
-        for lag in 1...order { r[lag] *= exp(-0.5 * pow(0.02 * Double(lag), 2)) }
-        // Levinson-Durbin recursion.
-        var a = [Double](repeating: 0, count: order + 1)
-        var error = r[0]
-        for i in 1...order {
-            var acc = r[i]
-            for j in 1..<i { acc -= a[j] * r[i - j] }
-            let k = acc / error
-            guard abs(k) < 1 else { break }
-            var next = a
-            next[i] = k
-            for j in 1..<i { next[j] = a[j] - k * a[i - j] }
-            a = next
-            error *= 1 - k * k
-            if error / r[0] < 0.01 { break }   // Cap the prediction gain at 20 dB.
-        }
-        var gamma = 1.0
-        return (1...order).map { j in gamma *= 0.98; return a[j] * gamma }
-    }
 
     /// Output gains to ±1.0 float. Decoded values are on a 24-bit integer scale. The
     /// specification leaves the filter bank's output gain (`rScale` in C.3.6) open; its
