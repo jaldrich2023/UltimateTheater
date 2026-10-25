@@ -411,7 +411,7 @@ struct PlayerView: View {
                 DockPreview.shared.start(in: window, engine: engine)
                 // Playing on this Mac: keep watching in a floating window on the desktop.
                 if engine.hasStarted, engine.isPlaying, failure == nil, !isPictureElsewhere {
-                    DesktopPictureInPicture.shared.show(engine: engine, mainWindow: window)
+                    DesktopPictureInPicture.shared.show(engine: engine, mainWindow: window, model: model)
                 }
             }
         }
@@ -889,6 +889,8 @@ struct PlayerView: View {
         engine = newEngine
         model.playerEngine = newEngine
         model.playerControls = controlHooks(for: newEngine)
+        // Changing episodes from the desktop picture-in-picture: it follows the new picture.
+        DesktopPictureInPicture.shared.follow(newEngine)
         airPlay.prepare(url: url, engine: newEngine)
         // While casting, the engine loads silently (for chapters, skip times, and Watch on
         // This Mac) and is paused once ready.
@@ -1399,8 +1401,10 @@ private struct TheaterSurface: NSViewRepresentable {
     final class LayerHostView: NSView {
         var hostedLayer: CALayer? {
             didSet {
-                oldValue?.removeFromSuperlayer()
-                if let hostedLayer { layer?.addSublayer(hostedLayer) }
+                // Leave a layer alone while the desktop picture-in-picture is showing it; it's
+                // handed back here when that window closes.
+                if let oldValue, !DesktopPictureInPicture.shared.isBorrowing(oldValue) { oldValue.removeFromSuperlayer() }
+                if let hostedLayer, !DesktopPictureInPicture.shared.isBorrowing(hostedLayer) { layer?.addSublayer(hostedLayer) }
                 needsLayout = true
             }
         }

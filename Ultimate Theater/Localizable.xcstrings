@@ -494,6 +494,9 @@
     "Close and pause" : {
 
     },
+    "Close Picture in Picture" : {
+
+    },
     "Close picture in picture and pause" : {
 
     },
@@ -1584,6 +1587,12 @@
     "Skip" : {
 
     },
+    "Skip Credits" : {
+
+    },
+    "Skip Intro" : {
+
+    },
     "Skip Intro or Credits" : {
 
     },
@@ -1640,6 +1649,9 @@
 
     },
     "Stop Casting" : {
+
+    },
+    "Stop Playback" : {
 
     },
     "Stop watching “%@”?" : {
