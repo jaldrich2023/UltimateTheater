@@ -87,6 +87,37 @@ enum AppWindow {
     }
 }
 
+/// Keeps a window's close, minimise, and zoom buttons visible and working.
+enum WindowControls {
+    static func show(in window: NSWindow) {
+        // Full screen has its own controls (shown at the top edge on hover).
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        window.styleMask.formUnion([.closable, .miniaturizable, .resizable])
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.isHidden = false
+            button.isEnabled = true
+            // The titlebar container itself can be hidden along with the toolbar.
+            var container = button.superview
+            while let view = container, view !== window.contentView?.superview {
+                view.isHidden = false
+                container = view.superview
+            }
+        }
+    }
+
+    /// After SwiftUI has finished updating the toolbar for the new state.
+    static func showSoon(in window: NSWindow?) {
+        guard let window else { return }
+        Task { @MainActor [weak window] in
+            for delay in [0, 150, 500] {
+                try? await Task.sleep(for: .milliseconds(delay))
+                if let window { show(in: window) }
+            }
+        }
+    }
+}
+
 /// A weak reference to the window hosting a view, filled in by `HostingWindowReader`.
 final class WindowReference {
     weak var window: NSWindow?
@@ -213,6 +244,7 @@ struct MainView: View {
         .background {
             HostingWindowReader { window in
                 hostWindow.window = window
+                if let window { WindowControls.show(in: window) }
                 // Shown again while already in full screen (after switching profiles, say).
                 if let window, window.styleMask.contains(.fullScreen), !isFullScreen {
                     isFullScreen = true
@@ -250,6 +282,12 @@ struct MainView: View {
         .windowToolbarFullScreenVisibility(.onHover)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .toolbar(model.nowPlaying == nil || model.isPlayerMinimized ? .automatic : .hidden, for: .windowToolbar)
+        // Hiding the toolbar for the player also hides the close, minimise, and zoom buttons;
+        // bring them back whenever the player opens or closes.
+        .onChange(of: model.nowPlaying == nil || model.isPlayerMinimized) {
+            WindowControls.showSoon(in: hostWindow.window)
+        }
+        .onChange(of: isFullScreen) { WindowControls.showSoon(in: hostWindow.window) }
         .fileImporter(isPresented: $model.isImporterPresented, allowedContentTypes: Self.importTypes,
                       allowsMultipleSelection: true) { result in
             if case .success(let urls) = result {

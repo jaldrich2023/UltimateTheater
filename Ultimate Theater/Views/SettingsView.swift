@@ -38,7 +38,8 @@ struct SettingsView: View {
             .navigationTitle(pane.title)
         }
         .navigationSplitViewStyle(.balanced)
-        .frame(width: 820, height: 600)
+        // Resizable (and so zoomable) down to its standard size.
+        .frame(minWidth: 820, idealWidth: 820, maxWidth: .infinity, minHeight: 600, idealHeight: 600, maxHeight: .infinity)
         .tint(Theme.accent)
         .background { AppBackground() }
         .background(WindowCentering())

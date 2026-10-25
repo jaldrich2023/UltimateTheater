@@ -55,6 +55,9 @@
     "%@ file with damage" : {
 
     },
+    "%@ left" : {
+
+    },
     "%@ of video with %lld audio track%@." : {
       "localizations" : {
         "en" : {
@@ -204,6 +207,16 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "^[%1$lld movie](inflect: true) · ^[%2$lld show](inflect: true) · ^[%3$lld episode](inflect: true)"
+          }
+        }
+      }
+    },
+    "^[%lld of %lld episode](inflect: true) watched" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "^[%1$lld of %2$lld episode](inflect: true) watched"
           }
         }
       }
@@ -478,6 +491,12 @@
     "Close" : {
 
     },
+    "Close and pause" : {
+
+    },
+    "Close picture in picture and pause" : {
+
+    },
     "Code" : {
 
     },
@@ -512,6 +531,9 @@
 
     },
     "Continue Watching" : {
+
+    },
+    "Continue watching %@" : {
 
     },
     "Continue with %@" : {
@@ -1086,6 +1108,9 @@
     "Nothing here yet." : {
 
     },
+    "Nothing in progress." : {
+
+    },
     "Nothing to Show" : {
 
     },
@@ -1124,6 +1149,9 @@
 
     },
     "Open" : {
+
+    },
+    "Open %@" : {
 
     },
     "Open in %@" : {
@@ -1437,6 +1465,9 @@
 
     },
     "Return to Player" : {
+
+    },
+    "Return to Ultimate Theater" : {
 
     },
     "Revoke" : {

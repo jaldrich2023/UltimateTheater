@@ -120,7 +120,8 @@ struct Ultimate_TheaterApp: App {
         }
         .modelContainer(container)
         .defaultPosition(.center)
-        .windowResizability(.contentSize)
+        // Resizable, so its zoom button works like the main window's.
+        .windowResizability(.contentMinSize)
     }
 }
 

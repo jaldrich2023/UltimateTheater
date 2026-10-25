@@ -280,6 +280,22 @@ struct PlayerView: View {
                         .accessibilityHidden(true)
                 }
 
+                // Without the bar (casting, AirPlay, or a file that won't play), picture-in-
+                // picture still sits in the lower-right corner.
+                if engine == nil || failure != nil || isPictureElsewhere {
+                    Button(action: model.minimizePlayer) {
+                        Image(systemName: "pip.enter")
+                            .font(.title3.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.theaterGlassCircle)
+                    .help("Picture in Picture: keep watching while you browse (Esc)")
+                    .accessibilityLabel("Picture in picture")
+                    .padding(28)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .opacity(isChromeVisible ? 1 : 0)
+                }
+
                 if let engine, failure == nil, !isPictureElsewhere {
                     // The synopsis panel stacked directly on top of the bar. The stack is pinned
                     // to the bottom of the screen, so as the panel grows, its bottom edge stays put
@@ -305,6 +321,7 @@ struct PlayerView: View {
                             .padding(.vertical, 14)
                         TheaterControls(engine: engine, episodes: episodeSkips, isCompact: isCompact,
                                         subtitleSearch: $subtitleSearch, onToggleFullScreen: toggleFullScreen,
+                                        onPictureInPicture: model.minimizePlayer,
                                         castButton: CastButton(profile: castProfile, activeDeviceID: cast?.device.id,
                                                                onCast: { startCasting(to: $0) }))
                             .frame(maxHeight: .infinity)
@@ -392,12 +409,17 @@ struct PlayerView: View {
             for await note in NotificationCenter.default.notifications(named: NSWindow.didMiniaturizeNotification) {
                 guard let window = note.object as? NSWindow, window === hostWindow.window, let engine else { continue }
                 DockPreview.shared.start(in: window, engine: engine)
+                // Playing on this Mac: keep watching in a floating window on the desktop.
+                if engine.hasStarted, engine.isPlaying, failure == nil, !isPictureElsewhere {
+                    DesktopPictureInPicture.shared.show(engine: engine, mainWindow: window)
+                }
             }
         }
         .task {
             for await note in NotificationCenter.default.notifications(named: NSWindow.didDeminiaturizeNotification) {
                 guard let window = note.object as? NSWindow, window === hostWindow.window else { continue }
                 DockPreview.shared.stop(in: window)
+                DesktopPictureInPicture.shared.hide()
             }
         }
         .task(id: current.id) {
@@ -408,6 +430,7 @@ struct PlayerView: View {
         .onAppear { CastDiscovery.shared.begin() }
         .onChange(of: cast?.phase) { _, phase in castPhaseChanged(phase) }
         .onDisappear {
+            DesktopPictureInPicture.shared.hide()
             PlaybackSleepGuard.shared.update(.none)
             saveProgress()
             CastDiscovery.shared.end()
@@ -626,16 +649,15 @@ struct PlayerView: View {
         .allowsHitTesting(false)
     }
 
+    private var isWindowFullScreen: Bool { hostWindow.window?.styleMask.contains(.fullScreen) ?? false }
+
     private var topBar: some View {
         HStack(alignment: .center, spacing: 16) {
-            Button(action: model.minimizePlayer) {
-                Image(systemName: "pip.enter")
-                    .font(.title3.weight(.semibold))
-                    .frame(width: 32, height: 32)
+            // The window's close, minimise, and zoom buttons (the system ones are hidden with
+            // the toolbar while the player fills the window). Full screen has its own.
+            if !isWindowFullScreen {
+                WindowTrafficLights(window: hostWindow.window)
             }
-            .buttonStyle(.theaterGlassCircle)
-            .help("Picture in Picture: keep watching while you browse (Esc)")
-            .accessibilityLabel("Picture in picture")
 
             Spacer()
 
@@ -649,8 +671,10 @@ struct PlayerView: View {
 
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 28)
-        .padding(.top, 24)
+        .padding(.leading, 20)
+        .padding(.trailing, 28)
+        // Lined up with where macOS puts the window buttons.
+        .padding(.top, 18)
         .padding(.bottom, 48)
         .background {
             LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
@@ -776,6 +800,13 @@ struct PlayerView: View {
                 Text(episode.name.isEmpty ? "Episode \(episode.number)" : episode.name)
                     .font(.callout.weight(isPlaying ? .bold : .regular))
                     .lineLimit(1)
+                // The playing episode's speaker sits right after its title.
+                if isPlaying {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.accent)
+                        .accessibilityLabel("Now playing")
+                }
                 Spacer(minLength: 4)
                 // Always shown, so every row lines up.
                 Text(episode.runtimeMinutes > 0
@@ -786,11 +817,7 @@ struct PlayerView: View {
                     .accessibilityLabel(episode.runtimeMinutes > 0
                                         ? Duration.seconds(episode.runtimeMinutes * 60).formatted(.units(allowed: [.hours, .minutes], width: .wide))
                                         : "Length unknown")
-                if isPlaying {
-                    Image(systemName: "speaker.wave.2.fill")
-                        .foregroundStyle(Theme.accent)
-                        .accessibilityLabel("Now playing")
-                } else if model.isWatched(episode, of: current.title) {
+                if !isPlaying, model.isWatched(episode, of: current.title) {
                     Image(systemName: "checkmark")
                         .foregroundStyle(.white.opacity(0.6))
                         .accessibilityLabel("Watched")
@@ -1390,7 +1417,8 @@ private struct TheaterSurface: NSViewRepresentable {
             super.layout()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            hostedLayer?.frame = bounds
+            // Not while the desktop picture-in-picture window has borrowed the layer.
+            if let hostedLayer, hostedLayer.superlayer === layer { hostedLayer.frame = bounds }
             CATransaction.commit()
         }
     }
@@ -1469,6 +1497,8 @@ private struct TheaterControls: View {
     /// "Find Subtitles…" sheet.
     @Binding var subtitleSearch: SubtitleSearchTarget?
     let onToggleFullScreen: () -> Void
+    /// Shrinks the player to picture-in-picture (the bar's last, lower-right control).
+    let onPictureInPicture: () -> Void
     /// Google Cast, DLNA, and Roku devices (and the AirPlay picker).
     let castButton: CastButton
 
@@ -1595,6 +1625,12 @@ private struct TheaterControls: View {
                 }
                 .help("Full Screen (F)")
                 .accessibilityLabel("Toggle full screen")
+
+                Button(action: onPictureInPicture) {
+                    Image(systemName: "pip.enter")
+                }
+                .help("Picture in Picture: keep watching while you browse (Esc)")
+                .accessibilityLabel("Picture in picture")
             }
             }
             .font(.title3)
@@ -1773,5 +1809,45 @@ private struct GrowUpward: ViewModifier, Animatable {
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { naturalHeight = $0 }
             .frame(height: naturalHeight > 0 ? max(naturalHeight * progress, 0) : nil, alignment: .bottom)
             .clipped()
+    }
+}
+
+/// Close, minimise, and zoom buttons drawn like the system's, for the player's top bar.
+private struct WindowTrafficLights: View {
+    let window: NSWindow?
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            light(Color(red: 1, green: 0.37, blue: 0.34), symbol: "xmark", label: "Close") {
+                window?.performClose(nil)
+            }
+            light(Color(red: 1, green: 0.74, blue: 0.18), symbol: "minus", label: "Minimize") {
+                window?.performMiniaturize(nil)
+            }
+            light(Color(red: 0.16, green: 0.79, blue: 0.25), symbol: "plus", label: "Zoom") {
+                window?.performZoom(nil)
+            }
+        }
+        .onHover { isHovered = $0 }
+    }
+
+    private func light(_ color: Color, symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle()
+                .fill(color)
+                .frame(width: 12, height: 12)
+                .overlay {
+                    Image(systemName: symbol)
+                        .font(.system(size: 7, weight: .heavy))
+                        .foregroundStyle(.black.opacity(0.6))
+                        .opacity(isHovered ? 1 : 0)
+                }
+                .overlay(Circle().strokeBorder(.black.opacity(0.15), lineWidth: 0.5))
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
     }
 }
